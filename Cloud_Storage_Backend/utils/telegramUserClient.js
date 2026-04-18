@@ -76,7 +76,7 @@ class TelegramUserClient {
       console.log(`📊 Size: ${(fileBuffer.length / 1024 / 1024).toFixed(2)} MB`);
       
       // Save file temporarily
-      const tempPath = path.join(__dirname, `../temp_${Date.now()}_${fileName}`);
+      const tempPath = `/tmp/temp_${Date.now()}_${fileName}`;
       fs.writeFileSync(tempPath, fileBuffer);
       
       // Send file using file path (this works reliably)
