@@ -1,16 +1,13 @@
-// app.js
 const express = require('express');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 const logger = require('morgan');
 const cors = require('cors');
 const multer = require('multer');
+const authRoutes = require('./routes/auth');
 
 // Import routes
 const uploadRouter = require('./routes/upload');
-
-// Import database for testing (optional - remove if not needed)
-const pool = require('./utils/database');
 
 const app = express();
 
@@ -30,18 +27,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Use upload routes
 app.use('/api', uploadRouter);
-
-// Test database connection (optional - remove if causing issues)
-(async () => {
-    try {
-        const connection = await pool.getConnection();
-        console.log('✅ MySQL database connected');
-        connection.release();
-    } catch (error) {
-        console.error('⚠️ MySQL connection warning:', error.message);
-        console.log('📌 Make sure MySQL is running and credentials are correct in .env');
-    }
-})();
+app.use('/api/auth', authRoutes);
 
 // Root route
 app.get('/', (req, res) => {
