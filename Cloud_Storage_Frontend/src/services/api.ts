@@ -57,13 +57,13 @@ class ApiService {
     setToken(token: string) {
         this.token = token;
         if (typeof window !== 'undefined') {
-            localStorage.setItem('token', token);
+            sessionStorage.setItem('token', token);
         }
     }
 
     getToken(): string | null {
         if (!this.token && typeof window !== 'undefined') {
-            this.token = localStorage.getItem('token');
+            this.token = sessionStorage.getItem('token');
         }
         return this.token;
     }
@@ -71,7 +71,7 @@ class ApiService {
     clearToken() {
         this.token = null;
         if (typeof window !== 'undefined') {
-            localStorage.removeItem('token');
+            sessionStorage.removeItem('token');
         }
     }
 
@@ -251,10 +251,10 @@ class ApiService {
         return this.request<{ status: string; timestamp: string; maxFileSize: string; database: string }>('/api/health');
     }
 
-    // Initialize token from localStorage
+    // Initialize token from sessionStorage
     initToken() {
         if (typeof window !== 'undefined') {
-            const token = localStorage.getItem('token');
+            const token = sessionStorage.getItem('token');
             if (token) {
                 this.token = token;
             }

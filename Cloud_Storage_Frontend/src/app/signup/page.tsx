@@ -4,6 +4,10 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import apiService from '@/services/api';
+import Image from 'next/image';
+import Telegram1 from '../../../assets/Telegram1.jpg';
+import Telegram2 from '../../../assets/Telegram2.jpg';
+import Telegram3 from '../../../assets/Telegram3.jpg';
 
 export default function SignupPage() {
   const router = useRouter();
@@ -11,20 +15,17 @@ export default function SignupPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   
-  // Step 1 fields
   const [phoneNumber, setPhoneNumber] = useState('');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
   const [channelUsername, setChannelUsername] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
   
-  // Email/password for later login
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
   useEffect(() => {
-    // Check if already logged in
     const token = apiService.getToken();
     if (token) {
       router.push('/dashboard');
@@ -35,13 +36,9 @@ export default function SignupPage() {
     e.preventDefault();
     setLoading(true);
     setError('');
-
     try {
       const response = await apiService.sendCode(phoneNumber, parseInt(apiId), apiHash);
-      
-      if (response.success) {
-        setStep(2);
-      }
+      if (response.success) setStep(2);
     } catch (err: any) {
       setError(err.response?.data?.error || err.message || 'Failed to send verification code');
     } finally {
@@ -53,15 +50,13 @@ export default function SignupPage() {
     e.preventDefault();
     setLoading(true);
     setError('');
-
     try {
       const response = await apiService.verifyCode(
-        phoneNumber, 
-        parseInt(verificationCode), 
+        phoneNumber,
+        parseInt(verificationCode),
         channelUsername || undefined,
         undefined
       );
-      
       if (response.success) {
         apiService.setToken(response.token);
         sessionStorage.setItem('temp_token', response.token);
@@ -77,26 +72,13 @@ export default function SignupPage() {
 
   const handleCompleteProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (password !== confirmPassword) {
-      setError('Passwords do not match');
-      return;
-    }
-    
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters');
-      return;
-    }
-
+    if (password !== confirmPassword) { setError('Passwords do not match'); return; }
+    if (password.length < 6) { setError('Password must be at least 6 characters'); return; }
     setLoading(true);
     setError('');
-
     try {
       const response = await apiService.completeProfile(email, password);
-      
-      if (response.success) {
-        router.push('/dashboard');
-      }
+      if (response.success) router.push('/dashboard');
     } catch (err: any) {
       setError(err.response?.data?.error || err.message || 'Profile completion failed');
     } finally {
@@ -108,9 +90,7 @@ export default function SignupPage() {
     <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black py-12">
       <div className="max-w-md w-full mx-4">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-black dark:text-white mb-2">
-            Create Account
-          </h1>
+          <h1 className="text-4xl font-bold text-black dark:text-white mb-2">Create Account</h1>
           <p className="text-gray-600 dark:text-gray-400">
             {step === 1 && 'Connect your Telegram account'}
             {step === 2 && 'Verify your phone number'}
@@ -118,8 +98,49 @@ export default function SignupPage() {
           </p>
         </div>
 
+        {/* STEP 1 */}
         {step === 1 && (
           <form onSubmit={handleSendCode} className="space-y-6">
+            {/* Guide images for API ID & Hash */}
+            <div className="space-y-4">
+              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
+                  📖 How to get your API ID & Hash — visit{' '}
+                  <a href="https://my.telegram.org/apps" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">
+                    my.telegram.org/apps
+                  </a>
+                </p>
+                <Image
+                  src={Telegram1}
+                  alt="Step 1: Go to my.telegram.org/apps and login"
+                  className="w-full h-auto object-contain"
+                  priority
+                />
+              </div>
+
+              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
+                  📖 Step 2 — Create an app or use existing one
+                </p>
+                <Image
+                  src={Telegram2}
+                  alt="Step 2: Create a new app or use existing one"
+                  className="w-full h-auto object-contain"
+                />
+              </div>
+
+              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
+                  📖 Step 3 — Copy your API ID and API Hash
+                </p>
+                <Image
+                  src={Telegram3}
+                  alt="Step 3: Copy your API ID and API Hash"
+                  className="w-full h-auto object-contain rounded-b-lg"
+                />
+              </div>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-black dark:text-white mb-2">
                 Telegram Phone Number
@@ -193,8 +214,37 @@ export default function SignupPage() {
           </form>
         )}
 
+        {/* STEP 2 */}
         {step === 2 && (
           <form onSubmit={handleVerifyCode} className="space-y-6">
+            {/* Guide images for phone number entry + confirmation code */}
+            <div className="space-y-4">
+              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
+                  📖 Step 1 — Enter your phone number at{' '}
+                  <a href="https://my.telegram.org" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">
+                    my.telegram.org
+                  </a>
+                </p>
+                <Image
+                  src={Telegram1}
+                  alt="Enter your phone number in international format on my.telegram.org"
+                  className="w-full h-auto object-contain"
+                />
+              </div>
+
+              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
+                  📖 Step 2 — Copy the confirmation code sent to your Telegram app
+                </p>
+                <Image
+                  src={Telegram2}
+                  alt="Copy the confirmation code from your Telegram app and enter it"
+                  className="w-full h-auto object-contain"
+                />
+              </div>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-black dark:text-white mb-2">
                 Verification Code
@@ -235,6 +285,7 @@ export default function SignupPage() {
           </form>
         )}
 
+        {/* STEP 3 */}
         {step === 3 && (
           <form onSubmit={handleCompleteProfile} className="space-y-6">
             <div>
