@@ -79,9 +79,6 @@ app.use((req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// ─── Graceful shutdown ─────────────────────────────────────────────────────
-// Render sends SIGTERM before stopping the container.
-// This ensures Telegram clients disconnect cleanly and DB connections close.
 process.on('SIGTERM', async () => {
     console.log('🛑 SIGTERM received — shutting down gracefully');
     await tgManager.disconnectAll();

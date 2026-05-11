@@ -26,12 +26,12 @@ const navigation = [
     },
     {
         name: 'Files',
-        href: '/files',
+        href: '/dashboard/files',
         icon: FolderOpen,
     },
     {
         name: 'Settings',
-        href: '/settings',
+        href: '/dashboard/settings',
         icon: Settings,
     },
 ];
@@ -83,13 +83,13 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
     };
 
     const handleLogout = () => {
-        localStorage.removeItem('token');
-        localStorage.removeItem('theme'); // Optional: clean up
-        router.push('/login');
+        localStorage.removeItem('theme');
+        sessionStorage.removeItem('telegram_user_account');
+        sessionStorage.removeItem('token');
+        router.push('/');
     };
 
     if (!mounted) {
-        // Return a placeholder while mounting to prevent flash
         return (
             <div className="fixed top-0 left-0 z-50 h-full w-65 border-r border-zinc-800 bg-zinc-950 lg:block hidden" />
         );
@@ -151,7 +151,8 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
                 {/* Navigation */}
                 <nav className="flex-1 space-y-1 px-3 py-4">
                     {navigation.map((item) => {
-                        const isActive = pathname.startsWith(item.href);
+                        const isActive = pathname === item.href ||
+                            (item.href !== '/dashboard' && pathname.startsWith(item.href));
                         const linkClass = isActive
                             ? 'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-200 bg-black text-white dark:bg-white dark:text-black'
                             : 'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-200 text-zinc-500 hover:bg-zinc-100 hover:text-black dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-white';

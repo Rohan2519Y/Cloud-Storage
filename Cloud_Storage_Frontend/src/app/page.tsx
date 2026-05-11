@@ -45,36 +45,6 @@ export default function LandingPage() {
     { step: '04', title: 'Share Anywhere', description: 'Generate links and share securely' },
   ];
 
-  const pricingPlans = [
-    {
-      name: 'Free',
-      price: '$0',
-      period: '',
-      description: 'Perfect for personal use',
-      features: ['Up to 2GB files', 'Basic sharing', '1 channel connection', '7-day file history'],
-      cta: 'Get Started',
-      popular: false,
-    },
-    {
-      name: 'Pro',
-      price: '$9',
-      period: '/mo',
-      description: 'Best for professionals',
-      features: ['Up to 2GB files', 'Advanced sharing', 'Unlimited channels', '30-day file history', 'Priority support'],
-      cta: 'Start Pro Trial',
-      popular: true,
-    },
-    {
-      name: 'Enterprise',
-      price: 'Custom',
-      period: '',
-      description: 'For large organizations',
-      features: ['Unlimited file size', 'Custom integrations', 'Dedicated support', 'SLA guarantee', 'SSO & compliance'],
-      cta: 'Contact Sales',
-      popular: false,
-    },
-  ];
-
   const faqs = [
     {
       q: 'Is my data really secure?',
@@ -182,9 +152,9 @@ export default function LandingPage() {
             {features.map((feature, i) => (
               <div
                 key={i}
-                className="p-6 rounded-xl border border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700 transition group"
+                className="p-6 rounded-xl border group-hover:scale-110 border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700 transition group"
               >
-                <div className="text-4xl mb-4 group-hover:scale-110 transition-transform">{feature.icon}</div>
+                <div className="text-4xl mb-4 transition-transform">{feature.icon}</div>
                 <h3 className="text-xl font-semibold text-black dark:text-white mb-2">{feature.title}</h3>
                 <p className="text-gray-600 dark:text-gray-400">{feature.description}</p>
               </div>
@@ -204,63 +174,11 @@ export default function LandingPage() {
           <div className="grid md:grid-cols-4 gap-8">
             {howItWorks.map((item, i) => (
               <div key={i} className="text-center group">
-                <div className="w-16 h-16 mx-auto rounded-full border-2 border-black dark:border-white flex items-center justify-center text-2xl font-bold mb-4 group-hover:scale-110 transition">
+                <div className="w-16 h-16 mx-auto dark:text-white rounded-full border-2 border-black dark:border-white flex items-center justify-center text-2xl font-bold mb-4 group-hover:scale-110 transition">
                   {item.step}
                 </div>
                 <h3 className="text-lg font-semibold text-black dark:text-white mb-2">{item.title}</h3>
                 <p className="text-gray-600 dark:text-gray-400 text-sm">{item.description}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Pricing Section */}
-      <section id="pricing" className="py-20 px-4">
-        <div className="max-w-7xl mx-auto">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold text-black dark:text-white mb-4">Simple, Transparent Pricing</h2>
-            <p className="text-xl text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">Choose the plan that works for you</p>
-          </div>
-
-          <div className="grid md:grid-cols-3 gap-8">
-            {pricingPlans.map((plan, i) => (
-              <div
-                key={i}
-                className={`p-8 rounded-xl transition-all ${
-                  plan.popular
-                    ? 'border-2 border-black dark:border-white shadow-lg'
-                    : 'border border-gray-200 dark:border-gray-800 hover:shadow-lg'
-                }`}
-              >
-                {plan.popular && (
-                  <span className="inline-block px-3 py-1 text-xs font-semibold bg-black dark:bg-white text-white dark:text-black rounded-full mb-4">
-                    Most Popular
-                  </span>
-                )}
-                <h3 className="text-2xl font-bold text-black dark:text-white mb-2">{plan.name}</h3>
-                <div className="text-4xl font-bold text-black dark:text-white mb-2">
-                  {plan.price}
-                  <span className="text-lg text-gray-500">{plan.period}</span>
-                </div>
-                <p className="text-gray-600 dark:text-gray-400 mb-6">{plan.description}</p>
-                <ul className="space-y-3 mb-8">
-                  {plan.features.map((feature, j) => (
-                    <li key={j} className="text-sm text-gray-600 dark:text-gray-400">
-                      ✓ {feature}
-                    </li>
-                  ))}
-                </ul>
-                <Link
-                  href={plan.name === 'Enterprise' ? '/contact' : '/signup'}
-                  className={`block text-center py-3 rounded-lg transition ${
-                    plan.popular
-                      ? 'bg-black dark:bg-white text-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200'
-                      : 'border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900'
-                  }`}
-                >
-                  {plan.cta}
-                </Link>
               </div>
             ))}
           </div>

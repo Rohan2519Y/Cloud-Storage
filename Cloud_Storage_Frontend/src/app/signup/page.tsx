@@ -26,8 +26,8 @@ export default function SignupPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
 
   useEffect(() => {
-    const token = apiService.getToken();
-    if (token) {
+    const userData = sessionStorage.getItem('telegram_user_account');
+    if (userData) {
       router.push('/dashboard');
     }
   }, [router]);
@@ -60,7 +60,7 @@ export default function SignupPage() {
       if (response.success) {
         apiService.setToken(response.token);
         sessionStorage.setItem('temp_token', response.token);
-        sessionStorage.setItem('user', JSON.stringify(response.user));
+        sessionStorage.setItem('telegram_user_account', JSON.stringify(response.user));
         setStep(3);
       }
     } catch (err: any) {

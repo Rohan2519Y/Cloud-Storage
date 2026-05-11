@@ -13,7 +13,6 @@ export default function LoginPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    // Check if already logged in
     const token = apiService.getToken();
     if (token) {
       router.push('/dashboard');
@@ -27,10 +26,10 @@ export default function LoginPage() {
 
     try {
       const response = await apiService.loginWithEmail(emailOrPhone, password);
-      
+
       if (response.success) {
         apiService.setToken(response.token);
-        sessionStorage.setItem('user', JSON.stringify(response.user));
+        sessionStorage.setItem('telegram_user_account', JSON.stringify(response.user));
         router.push('/dashboard');
       }
     } catch (err: any) {

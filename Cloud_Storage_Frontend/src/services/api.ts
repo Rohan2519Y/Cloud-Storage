@@ -2,6 +2,7 @@ import axios, { AxiosInstance, AxiosProgressEvent } from 'axios';
 
 // const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL_LOCAL || 'http://localhost:3000';
+// const API_BASE_URL = 'http://192.168.0.195:3000';
 
 interface RequestOptions {
     method?: 'GET' | 'POST' | 'PUT' | 'DELETE';

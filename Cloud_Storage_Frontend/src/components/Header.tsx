@@ -2,11 +2,27 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Menu, X } from 'lucide-react';
+import { Menu, X, Moon, Sun } from 'lucide-react';
+
+type Theme = 'dark' | 'light';
 
 export default function Header() {
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [theme, setTheme] = useState<Theme>('dark');
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    const stored = localStorage.getItem('theme') as Theme | null;
+    const initialTheme = stored || 'dark';
+    setTheme(initialTheme);
+    if (initialTheme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, []);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -16,12 +32,24 @@ export default function Header() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
+  const toggleTheme = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    localStorage.setItem('theme', next);
+    if (next === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  };
+
   const navLinks = [
     { name: 'Features', href: '#features' },
     { name: 'How it Works', href: '#how-it-works' },
-    { name: 'Pricing', href: '#pricing' },
     { name: 'FAQ', href: '#faq' },
   ];
+
+  if (!mounted) return null;
 
   return (
     <nav
@@ -54,6 +82,14 @@ export default function Header() {
 
           {/* Desktop Buttons */}
           <div className="hidden md:flex items-center space-x-4">
+            {/* Theme Toggle */}
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+            >
+              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+
             <Link
               href="/login"
               className="px-4 py-2 text-black dark:text-white hover:underline transition"
@@ -69,12 +105,22 @@ export default function Header() {
           </div>
 
           {/* Mobile Menu Button */}
-          <button
-            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-            className="md:hidden p-2 rounded-lg text-black dark:text-white hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-          >
-            {mobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
-          </button>
+          <div className="flex items-center gap-2 md:hidden">
+            {/* Theme Toggle - Mobile */}
+            <button
+              onClick={toggleTheme}
+              className="p-2 rounded-lg text-black dark:text-white hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+            >
+              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="p-2 rounded-lg text-black dark:text-white hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+            >
+              {mobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
+            </button>
+          </div>
         </div>
 
         {/* Mobile Menu */}
