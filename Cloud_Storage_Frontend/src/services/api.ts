@@ -1,6 +1,7 @@
 import axios, { AxiosInstance, AxiosProgressEvent } from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+// const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL_LOCAL || 'http://localhost:3000';
 
 interface RequestOptions {
     method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -19,7 +20,7 @@ class ApiService {
     constructor() {
         this.baseUrl = API_BASE_URL;
         this.token = null;
-        
+
         this.axiosInstance = axios.create({
             baseURL: this.baseUrl,
             timeout: 300000,
@@ -76,13 +77,13 @@ class ApiService {
     }
 
     private async request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-        const { 
-            method = 'GET', 
-            body, 
-            headers = {}, 
+        const {
+            method = 'GET',
+            body,
+            headers = {},
             isFormData = false,
             onUploadProgress,
-            onDownloadProgress 
+            onDownloadProgress
         } = options;
 
         const config: any = {
@@ -167,8 +168,8 @@ class ApiService {
 
     // Upload endpoints with progress
     async uploadFile(
-        file: File, 
-        channelId?: string, 
+        file: File,
+        channelId?: string,
         onProgress?: (percent: number) => void
     ) {
         const formData = new FormData();
@@ -232,7 +233,7 @@ class ApiService {
     // Download file as blob
     async downloadFileAsBlob(messageId: string, onProgress?: (percent: number) => void): Promise<Blob> {
         const url = this.getFileDownloadUrl(messageId);
-        
+
         const response = await this.axiosInstance.get(url, {
             responseType: 'blob',
             onDownloadProgress: (progressEvent) => {
@@ -242,7 +243,7 @@ class ApiService {
                 }
             },
         });
-        
+
         return response.data;
     }
 
