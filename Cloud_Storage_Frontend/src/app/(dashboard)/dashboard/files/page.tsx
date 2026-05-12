@@ -74,6 +74,9 @@ export default function FilesPage() {
     const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({})
     const fileInputRef = useRef<HTMLInputElement>(null)
     const xhrRef = useRef<XMLHttpRequest | null>(null)
+    const evtSourceRef = useRef<EventSource | null>(null)
+    const uploadIdRef = useRef<string>('')
+    const tokenRef = useRef<string>('')
 
     const fetchFolders = async () => {
         try {
@@ -201,33 +204,50 @@ export default function FilesPage() {
         if (file) setSelectedFile(file)
     }
 
+    const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
     const handleUpload = async (e: React.FormEvent) => {
         e.preventDefault()
         const fileInput = fileInputRef.current
         if (!fileInput?.files?.length) return
         const file = fileInput.files[0]
         const uploadId = crypto.randomUUID()
+        uploadIdRef.current = uploadId
 
         setUploading(true)
         setUploadProgress(0)
         setMessage(null)
 
+        const token = sessionStorage.getItem('token') || localStorage.getItem('token')
+        tokenRef.current = token || ''
+
+        // ── Step 1: connect to SSE progress BEFORE sending file ──
+        const evtSource = new EventSource(
+            `${BASE}/api/upload-progress/${uploadId}?token=${token}`
+        )
+        evtSource.onmessage = (e) => {
+            const data = JSON.parse(e.data)
+            setUploadProgress(data.progress)
+            if (data.progress >= 100) {
+                evtSource.close()
+            }
+        }
+        evtSource.onerror = () => evtSource.close()
+        evtSourceRef.current = evtSource
+        // ── Step 2: send file via XHR (no progress listener needed) ──
         const xhr = new XMLHttpRequest()
         xhrRef.current = xhr
+
         const formData = new FormData()
         formData.append('file', file)
-        formData.append('channelId', selectedChannel)
-        formData.append('uploadId', uploadId)
-        if (currentFolder) formData.append('folderId', currentFolder)
 
-        xhr.upload.addEventListener('progress', (e) => {
-            if (e.lengthComputable) {
-                const percent = Math.round((e.loaded / e.total) * 90)
-                setUploadProgress(percent)
-            }
+        const params = new URLSearchParams({
+            channelId: selectedChannel,
+            uploadId: uploadId,
+            ...(currentFolder ? { folderId: currentFolder } : {})
         })
 
         xhr.addEventListener('load', () => {
+            evtSource.close()
             try {
                 const data = JSON.parse(xhr.responseText)
                 if (data.success) {
@@ -247,15 +267,18 @@ export default function FilesPage() {
         })
 
         xhr.addEventListener('error', () => {
+            evtSource.close()
             setMessage({ type: 'error', text: 'Network error' })
             setUploading(false)
         })
 
-        // GET FRESH TOKEN before sending
-        const token = sessionStorage.getItem('token') || localStorage.getItem('token')
-        console.log('Upload token:', token?.substring(0, 20) + '...') // Debug
+        xhr.addEventListener('abort', () => {
+            evtSource.close()
+            setUploading(false)
+            setUploadProgress(0)
+        })
 
-        xhr.open('POST', `${process.env.NEXT_PUBLIC_API_URL_LOCAL || 'http://localhost:3000'}/api/upload`)
+        xhr.open('POST', `${BASE}/api/upload?${params}`)
         xhr.setRequestHeader('Authorization', `Bearer ${token}`)
         xhr.send(formData)
     }
@@ -459,6 +482,8 @@ export default function FilesPage() {
                                     type="button"
                                     onClick={() => {
                                         xhrRef.current?.abort()
+                                        evtSourceRef.current?.close()
+                                        fetch(`${BASE}/api/upload-cancel/${uploadIdRef.current}?token=${tokenRef.current}`, { method: 'POST' })
                                         setUploading(false)
                                         setUploadProgress(0)
                                         setSelectedFile(null)

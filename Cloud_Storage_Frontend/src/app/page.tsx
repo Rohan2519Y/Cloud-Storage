@@ -76,7 +76,7 @@ export default function LandingPage() {
       <section className="pt-32 pb-20 px-4">
         <div className="max-w-7xl mx-auto text-center">
           <div className="inline-flex items-center px-3 py-1 rounded-full bg-gray-100 dark:bg-gray-900 mb-8">
-            <span className="text-sm text-gray-600 dark:text-gray-400">✨ Powered by Telegram</span>
+            <span className="text-sm text-gray-600 dark:text-gray-400">✨ Powered by Rohan</span>
           </div>
 
           <h1 className="text-5xl md:text-7xl font-bold text-black dark:text-white mb-6">

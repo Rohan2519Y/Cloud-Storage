@@ -1,8 +1,3 @@
-// utils/telegramClientManager.js
-// Reuses Telegram connections per user instead of creating a new one per request.
-// On Render free (512MB RAM), each TelegramClient uses ~50-80MB.
-// Max 4 cached at once — evicts least-recently-used when full.
-
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 

@@ -4,7 +4,6 @@ const path = require('path');
 const cookieParser = require('cookie-parser');
 const logger = require('morgan');
 const cors = require('cors');
-const multer = require('multer');
 
 const authRoutes = require('./routes/auth');
 const uploadRouter = require('./routes/upload');
@@ -63,11 +62,6 @@ app.get('/', (req, res) => {
 
 // ─── Error handlers ────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
-    if (err instanceof multer.MulterError) {
-        if (err.code === 'LIMIT_FILE_SIZE') {
-            return res.status(400).json({ error: 'File exceeds 2GB limit' });
-        }
-    }
     if (err.message === 'Not allowed by CORS') {
         return res.status(403).json({ error: 'CORS: origin not allowed' });
     }

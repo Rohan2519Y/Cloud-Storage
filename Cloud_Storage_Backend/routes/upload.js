@@ -1,96 +1,54 @@
-// routes/upload.js — optimized for Render free tier
+// routes/upload.js
 const express = require('express');
-const multer = require('multer');
 const router = express.Router();
-const path = require('path');
-const fs = require('fs');
+const busboy = require('busboy');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
+const { CustomFile } = require('telegram/client/uploads');
 const pool = require('../utils/database');
 const tgManager = require('../utils/telegramClientManager');
 
-// ─── In-memory progress map ─────────────────────────────────────────────────
 const uploadProgressMap = new Map();
 const uploadCancelMap = new Map();
 
-// ─── Auth middleware ────────────────────────────────────────────────────────
 async function authenticateUser(req, res, next) {
     try {
-        const authHeader = req.headers.authorization;
-        const token = authHeader?.replace('Bearer ', '');
+        const token = req.headers.authorization?.replace('Bearer ', '');
         if (!token) return res.status(401).json({ error: 'Authentication required' });
-        const secret = process.env.JWT_SECRET;
-        const decoded = jwt.verify(token, secret);
-        const [users] = await pool.execute(
-            'SELECT * FROM users WHERE id = ?', [decoded.userId]
-        );
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.userId]);
         if (users.length === 0) return res.status(401).json({ error: 'User not found' });
-
         req.user = users[0];
         next();
     } catch (err) {
-        console.error('Auth error:', err.message);
         res.status(401).json({ error: 'Invalid token' });
     }
 }
 
-// ─── Temp dir ───────────────────────────────────────────────────────────────
-const TMP_DIR = '/tmp/tg-uploads';
-if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
-
-const upload = multer({
-    storage: multer.diskStorage({
-        destination: TMP_DIR,
-        filename: (req, file, cb) =>
-            cb(null, file.originalname),
-    }),
-    limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB
-});
-
-// ─── Cleanup helper ─────────────────────────────────────────────────────────
-function cleanupTmp(filePath) {
-    fs.unlink(filePath, err => {
-        if (err) console.warn('Could not delete tmp file:', err.message);
-    });
-}
-
-// ─── Simple in-memory rate limiter ──────────────────────────────────────────
 const rateLimitMap = new Map();
 function rateLimit(maxRequests, windowMs) {
     return (req, res, next) => {
         const key = req.ip;
         const now = Date.now();
         const entry = rateLimitMap.get(key) || { count: 0, resetAt: now + windowMs };
-
-        if (now > entry.resetAt) {
-            entry.count = 0;
-            entry.resetAt = now + windowMs;
-        }
+        if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + windowMs; }
         entry.count++;
         rateLimitMap.set(key, entry);
-
         if (entry.count > maxRequests) {
             return res.status(429).json({ error: 'Too many requests. Please slow down.' });
         }
         next();
     };
 }
-
-// Clean rate limit map every 5 min
 setInterval(() => {
     const now = Date.now();
-    for (const [key, entry] of rateLimitMap) {
-        if (now > entry.resetAt) rateLimitMap.delete(key);
-    }
+    for (const [k, v] of rateLimitMap) if (now > v.resetAt) rateLimitMap.delete(k);
 }, 5 * 60 * 1000);
 
-// ─── Concurrent upload limiter ──────────────────────────────────────────────
 let activeUploads = 0;
-const MAX_CONCURRENT_UPLOADS = 2;
+const MAX_CONCURRENT_UPLOADS = 3;
 
-// ─── Routes ─────────────────────────────────────────────────────────────────
-
-// HEALTH
+// ─── HEALTH ─────────────────────────────────────────────────────────────────
 router.get('/health', (req, res) => {
     res.json({
         status: 'OK',
@@ -98,43 +56,35 @@ router.get('/health', (req, res) => {
         activeUploads,
         maxConcurrentUploads: MAX_CONCURRENT_UPLOADS,
         cachedTelegramClients: tgManager.clients?.size ?? 0,
+        mode: 'busboy-streaming',
     });
 });
 
-// SSE PROGRESS — called by frontend to stream Telegram upload progress
+// ─── SSE PROGRESS ───────────────────────────────────────────────────────────
 router.get('/upload-progress/:uploadId', async (req, res) => {
-    // Accept token from query param since EventSource can't set headers
     const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
-    try {
-        jwt.verify(token, process.env.JWT_SECRET);
-    } catch {
-        return res.status(401).end();
-    }
+    try { jwt.verify(token, process.env.JWT_SECRET); }
+    catch { return res.status(401).end(); }
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Important for Nginx/Render proxies
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
     const id = req.params.uploadId;
-
-    // Send initial ping so client knows connection is alive
     res.write(`data: ${JSON.stringify({ progress: 0 })}\n\n`);
 
     const interval = setInterval(() => {
         const progress = uploadProgressMap.get(id);
-
         if (progress !== undefined) {
             res.write(`data: ${JSON.stringify({ progress })}\n\n`);
-
             if (progress >= 100) {
                 clearInterval(interval);
                 uploadProgressMap.delete(id);
                 res.end();
             }
         } else {
-            // Send heartbeat to keep connection alive
             res.write(`: heartbeat\n\n`);
         }
     }, 300);
@@ -145,156 +95,214 @@ router.get('/upload-progress/:uploadId', async (req, res) => {
     });
 });
 
+// ─── CANCEL ─────────────────────────────────────────────────────────────────
 router.post('/upload-cancel/:uploadId', async (req, res) => {
     const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
-    try {
-        jwt.verify(token, process.env.JWT_SECRET);
-    } catch {
-        return res.status(401).end();
-    }
-
+    try { jwt.verify(token, process.env.JWT_SECRET); }
+    catch { return res.status(401).end(); }
     const id = req.params.uploadId;
     uploadCancelMap.set(id, true);
     uploadProgressMap.delete(id);
     res.json({ success: true });
 });
 
-// UPLOAD — streams file from disk to Telegram, then deletes temp file
-router.post(
-    '/upload',
+// ─── UPLOAD ──────────────────────────────────────────────────────────────────
+// Fix: gramjs switches to filePath mode for files > 20MB.
+// Passing maxBufferSize: fileSize + 1 forces it to always use buffer mode.
+router.post('/upload',
     authenticateUser,
     rateLimit(10, 60 * 1000),
-    upload.single('file'),
     async (req, res) => {
-        if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
         if (activeUploads >= MAX_CONCURRENT_UPLOADS) {
-            cleanupTmp(req.file.path);
             return res.status(429).json({
-                error: 'Server busy. Another upload is in progress. Please wait a moment.',
+                error: `Server busy (${activeUploads}/${MAX_CONCURRENT_UPLOADS} uploads active). Try again shortly.`
             });
         }
 
         activeUploads++;
-        const filePath = req.file.path;
 
         try {
             const user = req.user;
-            const file = req.file;
-            const channelId = req.body.channelId || user.default_group_id;
-            const uploadId = req.body.uploadId || null;
-            const folderId = req.body.folderId || null;
+            const channelId = req.query.channelId || user.default_group_id;
+            const uploadId = req.query.uploadId || null;
+            const folderId = req.query.folderId || null;
 
             if (!channelId) {
-                cleanupTmp(filePath);
+                activeUploads--;
                 return res.status(400).json({ error: 'No channel specified' });
             }
 
-            console.log(`📤 Upload started: ${file.originalname} (${uploadId})`);
-
-            if (uploadId) uploadProgressMap.set(uploadId, 50);
-
-            const client = await tgManager.getClient(user);
-
-            let entity;
-            try {
-                entity = await client.getEntity(parseInt(channelId));
-            } catch {
-                if (user.default_channel_username) {
-                    entity = await client.getEntity(user.default_channel_username);
-                } else {
-                    throw new Error('Cannot find Telegram channel');
-                }
-            }
-
-            let pollingDone = false;
-
-            const result = await client.sendFile(entity, {
-                file: filePath,
-                fileName: file.originalname,
-                forceDocument: true,
-                progressCallback: (progress) => {
-                    if (uploadCancelMap.get(uploadId)) {
-                        throw new Error('UPLOAD_CANCELLED');
-                    }
-
-                    const p = Math.round(50 + Math.min(progress, 1) * 49);
-                    const display = Math.min(p, 99);
-                    if (uploadId) uploadProgressMap.set(uploadId, display);
-
-                    process.stdout.write(`\r📊 Telegram: ${Math.round(progress * 100)}%`);
-
-                    if (progress >= 1) pollingDone = true;
-                },
+            const bb = busboy({
+                headers: req.headers,
+                limits: { fileSize: 2 * 1024 * 1024 * 1024 }
             });
 
-            pollingDone = true;
-            if (uploadId) uploadProgressMap.set(uploadId, 100);
+            let fileName = '';
+            let mimeType = 'application/octet-stream';
+            let fileSize = 0;
 
-            console.log(`\n✅ Upload complete: message ID ${result.id}`);
+            const uploadPromise = new Promise((resolve, reject) => {
+
+                bb.on('file', async (fieldname, fileStream, info) => {
+                    fileName = info.filename || 'unnamed_file';
+                    mimeType = info.mimeType || 'application/octet-stream';
+
+                    console.log(`📤 Stream upload started: ${fileName} (uploadId: ${uploadId})`);
+
+                    try {
+                        if (uploadId) uploadProgressMap.set(uploadId, 5);
+
+                        const client = await tgManager.getClient(user);
+
+                        let entity;
+                        try {
+                            entity = await client.getEntity(parseInt(channelId));
+                        } catch {
+                            if (user.default_channel_username) {
+                                entity = await client.getEntity(user.default_channel_username);
+                            } else throw new Error('Cannot find Telegram channel');
+                        }
+
+                        const chunks = [];
+                        let received = 0;
+
+                        fileStream.on('data', (chunk) => {
+                            if (uploadCancelMap.get(uploadId)) {
+                                fileStream.destroy(new Error('UPLOAD_CANCELLED'));
+                                return;
+                            }
+                            chunks.push(chunk);
+                            received += chunk.length;
+
+                            const receiveProgress = Math.min(
+                                Math.round((received / (req.headers['content-length'] || received)) * 50),
+                                50
+                            );
+                            if (uploadId) uploadProgressMap.set(uploadId, receiveProgress);
+
+                            if (received % (50 * 1024 * 1024) < chunk.length) {
+                                console.log(`📥 Buffered: ${(received / 1024 / 1024).toFixed(0)} MB`);
+                            }
+                        });
+
+                        fileStream.on('limit', () => reject(new Error('File exceeds 2GB limit')));
+
+                        fileStream.on('end', async () => {
+                            try {
+                                if (uploadCancelMap.get(uploadId)) {
+                                    return reject(new Error('UPLOAD_CANCELLED'));
+                                }
+
+                                fileSize = received;
+                                const fileBuffer = Buffer.concat(chunks);
+                                console.log(`📦 Sending ${(fileSize / 1024 / 1024).toFixed(1)} MB to Telegram...`);
+                                if (uploadId) uploadProgressMap.set(uploadId, 50);
+
+                                const { CustomFile, uploadFile } = require('telegram/client/uploads');
+
+                                // Step 1: upload directly with maxBufferSize override
+                                // This bypasses the 20MB threshold that switches to filePath mode
+                                const customFile = new CustomFile(fileName, fileSize, '', fileBuffer);
+                                const fileHandle = await uploadFile(client, {
+                                    file: customFile,
+                                    workers: 1,
+                                    maxBufferSize: fileSize + 1,
+                                    onProgress: (progress) => {
+                                        if (uploadCancelMap.get(uploadId)) {
+                                            throw new Error('UPLOAD_CANCELLED');
+                                        }
+                                        const p = Math.round(50 + Math.min(progress, 1) * 49);
+                                        if (uploadId) uploadProgressMap.set(uploadId, Math.min(p, 99));
+                                        process.stdout.write(`\r📤 Telegram: ${Math.round(progress * 100)}%`);
+                                    },
+                                });
+
+                                // Step 2: send the uploaded handle as a message
+                                const result = await client.sendFile(entity, {
+                                    file: fileHandle,
+                                    fileName: fileName,
+                                    mimeType: mimeType,
+                                    forceDocument: true,
+                                });
+
+                                console.log(`\n✅ Done — message ID ${result.id}`);
+                                if (uploadId) uploadProgressMap.set(uploadId, 100);
+                                resolve(result);
+
+                            } catch (err) { reject(err); }
+                        });
+
+                        fileStream.on('error', reject);
+
+                    } catch (err) { reject(err); }
+                });
+
+                bb.on('error', reject);
+                bb.on('finish', () => {
+                    if (!fileName) reject(new Error('No file field in request'));
+                });
+            });
+
+            req.pipe(bb);
+
+            const result = await uploadPromise;
 
             const fileId = uuidv4();
             await pool.execute(
                 `INSERT INTO uploaded_files 
-                (id, user_id, original_name, file_size, mime_type, telegram_message_id, channel_id, folder_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-                [fileId, user.id, file.originalname, file.size, file.mimetype, result.id.toString(), channelId, folderId]
+                 (id, user_id, original_name, file_size, mime_type, telegram_message_id, channel_id, folder_id, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                [fileId, user.id, fileName, fileSize, mimeType, result.id.toString(), channelId, folderId]
             );
 
             res.json({
                 success: true,
                 file: {
                     id: fileId,
-                    name: file.originalname,
-                    size: file.size,
+                    name: fileName,
+                    size: fileSize,
                     messageId: result.id,
                     channelId,
-                },
+                }
             });
+
         } catch (err) {
-            const wasCancelled = err.message === 'UPLOAD_CANCELLED' || uploadCancelMap.get(req.body.uploadId);
+            const wasCancelled = err.message === 'UPLOAD_CANCELLED' || uploadCancelMap.get(req.query.uploadId);
 
             if (wasCancelled) {
-                console.log(`🚫 Upload cancelled: ${req.body.uploadId}`);
-                if (!res.headersSent) {
-                    res.status(499).json({ error: 'Upload cancelled' });
-                }
+                console.log(`🚫 Upload cancelled: ${req.query.uploadId}`);
+                if (!res.headersSent) res.status(499).json({ error: 'Upload cancelled' });
             } else {
                 console.error('Upload error:', err.message);
-                if (!res.headersSent) {
-                    res.status(500).json({ error: err.message });
-                }
+                if (!res.headersSent) res.status(500).json({ error: err.message });
             }
 
-            if (req.body.uploadId) {
-                uploadProgressMap.delete(req.body.uploadId);
-                uploadCancelMap.delete(req.body.uploadId);
+            if (req.query.uploadId) {
+                uploadProgressMap.delete(req.query.uploadId);
+                uploadCancelMap.delete(req.query.uploadId);
             }
+
         } finally {
             activeUploads--;
-            cleanupTmp(filePath);
         }
     }
 );
 
-// GET FILES — lightweight, no Telegram call
+// ─── GET FILES ──────────────────────────────────────────────────────────────
 router.get('/files', authenticateUser, async (req, res) => {
     try {
         const limit = Math.min(parseInt(req.query.limit) || 50, 100);
         const folderId = req.query.folder_id === 'null' ? null : req.query.folder_id || null;
 
         let query, params;
-
         if (folderId) {
             query = `SELECT id, original_name, file_size, mime_type, telegram_message_id, channel_id, folder_id, created_at 
-                     FROM uploaded_files 
-                     WHERE user_id = ? AND folder_id = ? 
-                     ORDER BY created_at DESC LIMIT ` + limit;
+                     FROM uploaded_files WHERE user_id = ? AND folder_id = ? ORDER BY created_at DESC LIMIT ` + limit;
             params = [req.user.id, folderId];
         } else {
             query = `SELECT id, original_name, file_size, mime_type, telegram_message_id, channel_id, folder_id, created_at 
-                     FROM uploaded_files 
-                     WHERE user_id = ? AND folder_id IS NULL 
-                     ORDER BY created_at DESC LIMIT ` + limit;
+                     FROM uploaded_files WHERE user_id = ? AND folder_id IS NULL ORDER BY created_at DESC LIMIT ` + limit;
             params = [req.user.id];
         }
 
@@ -305,7 +313,7 @@ router.get('/files', authenticateUser, async (req, res) => {
     }
 });
 
-// GET FILE BY ID
+// ─── GET FILE BY ID ─────────────────────────────────────────────────────────
 router.get('/files/:id', authenticateUser, async (req, res) => {
     try {
         const [files] = await pool.execute(
@@ -319,46 +327,35 @@ router.get('/files/:id', authenticateUser, async (req, res) => {
     }
 });
 
-// DOWNLOAD — streams from Telegram to response
-router.get(
-    '/download/:messageId',
-    authenticateUser,
-    rateLimit(20, 60 * 1000),
-    async (req, res) => {
-        try {
-            const [fileRecords] = await pool.execute(
-                'SELECT * FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
-                [req.params.messageId, req.user.id]
-            );
-            if (fileRecords.length === 0)
-                return res.status(404).json({ error: 'File not found' });
+// ─── DOWNLOAD ───────────────────────────────────────────────────────────────
+router.get('/download/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async (req, res) => {
+    try {
+        const [fileRecords] = await pool.execute(
+            'SELECT * FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
+            [req.params.messageId, req.user.id]
+        );
+        if (fileRecords.length === 0) return res.status(404).json({ error: 'File not found' });
 
-            const fileRecord = fileRecords[0];
-            const client = await tgManager.getClient(req.user);
-            const chat = await client.getEntity(parseInt(fileRecord.channel_id));
-            const messages = await client.getMessages(chat, {
-                ids: [parseInt(req.params.messageId)],
-            });
+        const fileRecord = fileRecords[0];
+        const client = await tgManager.getClient(req.user);
+        const chat = await client.getEntity(parseInt(fileRecord.channel_id));
+        const messages = await client.getMessages(chat, { ids: [parseInt(req.params.messageId)] });
 
-            if (!messages?.length || !messages[0].media)
-                return res.status(404).json({ error: 'File not found on Telegram' });
+        if (!messages?.length || !messages[0].media)
+            return res.status(404).json({ error: 'File not found on Telegram' });
 
-            const fileBuffer = await client.downloadMedia(messages[0], {});
-            res.setHeader('Content-Type', fileRecord.mime_type || 'application/octet-stream');
-            res.setHeader(
-                'Content-Disposition',
-                `attachment; filename="${encodeURIComponent(fileRecord.original_name)}"`
-            );
-            res.setHeader('Content-Length', fileBuffer.length);
-            res.send(fileBuffer);
-        } catch (err) {
-            console.error('Download error:', err.message);
-            res.status(500).json({ error: err.message });
-        }
+        const fileBuffer = await client.downloadMedia(messages[0], {});
+        res.setHeader('Content-Type', fileRecord.mime_type || 'application/octet-stream');
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.original_name)}"`);
+        res.setHeader('Content-Length', fileBuffer.length);
+        res.send(fileBuffer);
+    } catch (err) {
+        console.error('Download error:', err.message);
+        res.status(500).json({ error: err.message });
     }
-);
+});
 
-// VIEW (inline)
+// ─── VIEW ────────────────────────────────────────────────────────────────────
 router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async (req, res) => {
     try {
         const [fileRecords] = await pool.execute(
@@ -370,19 +367,14 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
         const fileRecord = fileRecords[0];
         const client = await tgManager.getClient(req.user);
         const chat = await client.getEntity(parseInt(fileRecord.channel_id));
-        const messages = await client.getMessages(chat, {
-            ids: [parseInt(req.params.messageId)],
-        });
+        const messages = await client.getMessages(chat, { ids: [parseInt(req.params.messageId)] });
 
         if (!messages?.length || !messages[0].media)
             return res.status(404).json({ error: 'File not found on Telegram' });
 
         const fileBuffer = await client.downloadMedia(messages[0], {});
         res.setHeader('Content-Type', fileRecord.mime_type || 'application/octet-stream');
-        res.setHeader(
-            'Content-Disposition',
-            `inline; filename="${encodeURIComponent(fileRecord.original_name)}"`
-        );
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileRecord.original_name)}"`);
         res.setHeader('Content-Length', fileBuffer.length);
         res.send(fileBuffer);
     } catch (err) {
@@ -390,13 +382,11 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
     }
 });
 
-// SEARCH
+// ─── SEARCH ─────────────────────────────────────────────────────────────────
 router.get('/search', authenticateUser, rateLimit(30, 60 * 1000), async (req, res) => {
     try {
         const q = req.query.q;
-        if (!q || q.length < 2)
-            return res.status(400).json({ error: 'Query must be at least 2 characters' });
-
+        if (!q || q.length < 2) return res.status(400).json({ error: 'Query must be at least 2 characters' });
         const [files] = await pool.execute(
             `SELECT id, original_name, file_size, mime_type, telegram_message_id, created_at
              FROM uploaded_files WHERE user_id = ? AND original_name LIKE ? ORDER BY created_at DESC LIMIT 50`,
@@ -408,7 +398,7 @@ router.get('/search', authenticateUser, rateLimit(30, 60 * 1000), async (req, re
     }
 });
 
-// STATS
+// ─── STATS ──────────────────────────────────────────────────────────────────
 router.get('/stats', authenticateUser, async (req, res) => {
     try {
         const [[stats]] = await pool.execute(
@@ -422,27 +412,23 @@ router.get('/stats', authenticateUser, async (req, res) => {
                 totalFiles: stats.totalFiles,
                 totalSizeInMB: (stats.totalSize / 1024 / 1024).toFixed(2),
                 totalSizeInGB: (stats.totalSize / 1024 / 1024 / 1024).toFixed(3),
-            },
+            }
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// DELETE
+// ─── DELETE ─────────────────────────────────────────────────────────────────
 router.delete('/files/:id', authenticateUser, async (req, res) => {
     try {
         const [files] = await pool.execute(
             'SELECT * FROM uploaded_files WHERE id = ? AND user_id = ?',
             [req.params.id, req.user.id]
         );
-
-        if (files.length === 0) {
-            return res.status(404).json({ error: 'File not found' });
-        }
+        if (files.length === 0) return res.status(404).json({ error: 'File not found' });
 
         const file = files[0];
-
         try {
             const client = await tgManager.getClient(req.user);
             const entity = await client.getEntity(parseInt(file.channel_id));
@@ -452,24 +438,18 @@ router.delete('/files/:id', authenticateUser, async (req, res) => {
             console.error('Telegram delete error:', tgErr.message);
         }
 
-        // Delete from database
         const [result] = await pool.execute(
             'DELETE FROM uploaded_files WHERE id = ? AND user_id = ?',
             [req.params.id, req.user.id]
         );
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ error: 'File not found' });
-        }
-
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'File not found' });
         res.json({ success: true, message: 'File deleted from Telegram and database' });
-
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// CHANNELS
+// ─── CHANNELS ───────────────────────────────────────────────────────────────
 router.get('/channels', authenticateUser, async (req, res) => {
     try {
         const [channels] = await pool.execute(
@@ -483,7 +463,7 @@ router.get('/channels', authenticateUser, async (req, res) => {
     }
 });
 
-// GET folders
+// ─── FOLDERS ────────────────────────────────────────────────────────────────
 router.get('/folders', authenticateUser, async (req, res) => {
     const parentId = req.query.parent_id === 'null' ? null : req.query.parent_id || null;
     const [folders] = await pool.execute(
@@ -493,7 +473,6 @@ router.get('/folders', authenticateUser, async (req, res) => {
     res.json({ success: true, folders });
 });
 
-// CREATE folder
 router.post('/folders', authenticateUser, async (req, res) => {
     const { name, parent_id } = req.body;
     const id = uuidv4();
@@ -504,13 +483,11 @@ router.post('/folders', authenticateUser, async (req, res) => {
     res.json({ success: true, folder: { id, name, parent_id } });
 });
 
-// DELETE folder
 router.delete('/folders/:id', authenticateUser, async (req, res) => {
     await pool.execute('DELETE FROM folders WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
     res.json({ success: true });
 });
 
-// GET folder path (breadcrumb)
 router.get('/folders/path/:id', authenticateUser, async (req, res) => {
     const path = [];
     let currentId = req.params.id;

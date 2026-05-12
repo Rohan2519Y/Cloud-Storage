@@ -1,162 +1,217 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { Menu, X, Moon, Sun } from 'lucide-react';
-
-type Theme = 'dark' | 'light';
+import { Moon, Sun } from 'lucide-react';
 
 export default function Header() {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [theme, setTheme] = useState('dark');
   const [scrolled, setScrolled] = useState(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [theme, setTheme] = useState<Theme>('dark');
-  const [mounted, setMounted] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
+  // Init theme
   useEffect(() => {
-    setMounted(true);
-    const stored = localStorage.getItem('theme') as Theme | null;
-    const initialTheme = stored || 'dark';
-    setTheme(initialTheme);
-    if (initialTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    const stored = localStorage.getItem('theme') || 'dark';
+    setTheme(stored);
+    document.documentElement.classList.toggle('dark', stored === 'dark');
   }, []);
 
+  // Scroll shadow
   useEffect(() => {
-    const handleScroll = () => {
-      setScrolled(window.scrollY > 50);
+    const onScroll = () => setScrolled(window.scrollY > 8);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Lock body scroll when menu open
+  useEffect(() => {
+    document.body.style.overflow = menuOpen ? 'hidden' : '';
+    return () => { document.body.style.overflow = ''; };
+  }, [menuOpen]);
+
+  // Close on outside tap
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent | TouchEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
     };
-    window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, []);
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('touchstart', handler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('touchstart', handler);
+    };
+  }, [menuOpen]);
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
     setTheme(next);
     localStorage.setItem('theme', next);
-    if (next === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    document.documentElement.classList.toggle('dark', next === 'dark');
   };
 
+  const closeMenu = () => setMenuOpen(false);
+
   const navLinks = [
-    { name: 'Features', href: '#features' },
-    { name: 'How it Works', href: '#how-it-works' },
-    { name: 'FAQ', href: '#faq' },
+    { label: 'Features', href: '#features' },
+    { label: 'How it Works', href: '#how-it-works' },
+    { label: 'FAQ', href: '#faq' },
   ];
 
-  if (!mounted) return null;
-
   return (
-    <nav
-      className={`fixed top-0 w-full z-50 transition-all duration-300 ${
-        scrolled
-          ? 'bg-white/90 dark:bg-black/90 backdrop-blur-md border-b border-gray-200 dark:border-gray-800'
-          : 'bg-transparent'
-      }`}
-    >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
-          {/* Logo */}
-          <Link href="/" className="flex items-center space-x-2 group">
-            <span className="text-2xl transition-transform group-hover:scale-105">📁</span>
-            <span className="font-bold text-xl text-black dark:text-white">CloudStorage</span>
-          </Link>
+    <>
+      <header
+        ref={menuRef}
+        className={`
+          fixed top-0 left-0 right-0 z-50
+          bg-white dark:bg-black
+          transition-shadow duration-200
+          ${scrolled ? 'shadow-[0_1px_0_0_rgba(0,0,0,0.08)] dark:shadow-[0_1px_0_0_rgba(255,255,255,0.08)]' : ''}
+        `}
+      >
+        <div className="max-w-7xl mx-auto px-4 sm:px-6">
+          <div className="flex items-center justify-between h-16">
 
-          {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center space-x-8">
-            {navLinks.map((link) => (
-              <a
-                key={link.name}
-                href={link.href}
-                className="text-gray-600 dark:text-gray-300 hover:text-black dark:hover:text-white transition-colors"
+            {/* Logo */}
+            <Link
+              href="/"
+              onClick={closeMenu}
+              className="flex items-center gap-2 shrink-0 select-none"
+            >
+              <span className="text-xl leading-none">📁</span>
+              <span className="font-bold text-base tracking-tight text-black dark:text-white">
+                CloudStorage
+              </span>
+            </Link>
+
+            {/* Desktop Nav */}
+            <nav className="hidden md:flex items-center gap-1">
+              {navLinks.map(link => (
+                <a
+                  key={link.href}
+                  href={link.href}
+                  className="px-4 py-2 text-sm text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+                >
+                  {link.label}
+                </a>
+              ))}
+            </nav>
+
+            {/* Desktop Actions */}
+            <div className="hidden md:flex items-center gap-2">
+              <button
+                onClick={toggleTheme}
+                className="p-2 rounded-lg text-zinc-500 hover:text-black dark:text-zinc-400 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+                aria-label="Toggle theme"
               >
-                {link.name}
+                {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+              </button>
+              <Link
+                href="/login"
+                className="px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white transition-colors"
+              >
+                Sign In
+              </Link>
+              <Link
+                href="/signup"
+                className="px-4 py-2 text-sm font-semibold bg-black dark:bg-white text-white dark:text-black rounded-xl hover:opacity-85 transition-opacity active:scale-95"
+              >
+                Get Started
+              </Link>
+            </div>
+
+            {/* Mobile: theme + hamburger */}
+            <div className="flex items-center gap-1 md:hidden">
+              <button
+                onClick={toggleTheme}
+                className="p-2 rounded-lg text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+                aria-label="Toggle theme"
+              >
+                {theme === 'dark' ? <Sun size={19} /> : <Moon size={19} />}
+              </button>
+
+              {/* Hamburger — pure CSS animated, no SVG swap needed */}
+              <button
+                onClick={() => setMenuOpen(v => !v)}
+                aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+                aria-expanded={menuOpen}
+                className="relative w-10 h-10 flex items-center justify-center rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
+              >
+                <span className="sr-only">{menuOpen ? 'Close' : 'Menu'}</span>
+                <div className="w-5 flex flex-col gap-[5px] items-end">
+                  <span
+                    className={`block h-[1.5px] bg-zinc-800 dark:bg-zinc-200 rounded-full transition-all duration-300 origin-center
+                      ${menuOpen ? 'w-5 translate-y-[6.5px] rotate-45' : 'w-5'}`}
+                  />
+                  <span
+                    className={`block h-[1.5px] bg-zinc-800 dark:bg-zinc-200 rounded-full transition-all duration-300
+                      ${menuOpen ? 'w-0 opacity-0' : 'w-3.5'}`}
+                  />
+                  <span
+                    className={`block h-[1.5px] bg-zinc-800 dark:bg-zinc-200 rounded-full transition-all duration-300 origin-center
+                      ${menuOpen ? 'w-5 -translate-y-[6.5px] -rotate-45' : 'w-5'}`}
+                  />
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile Dropdown — inside header so ref works */}
+        <div
+          className={`
+            md:hidden overflow-hidden transition-all duration-300 ease-in-out
+            border-t border-zinc-100 dark:border-zinc-900
+            bg-white dark:bg-black
+            ${menuOpen ? 'max-h-[400px] opacity-100' : 'max-h-0 opacity-0 pointer-events-none'}
+          `}
+        >
+          <nav className="px-4 pt-3 pb-2 space-y-0.5">
+            {navLinks.map(link => (
+              <a
+                key={link.href}
+                href={link.href}
+                onClick={closeMenu}
+                className="flex items-center px-4 py-3 text-base font-medium text-zinc-700 dark:text-zinc-300 hover:text-black dark:hover:text-white hover:bg-zinc-50 dark:hover:bg-zinc-900 rounded-xl transition-colors active:bg-zinc-100 dark:active:bg-zinc-800"
+              >
+                {link.label}
               </a>
             ))}
-          </div>
+          </nav>
 
-          {/* Desktop Buttons */}
-          <div className="hidden md:flex items-center space-x-4">
-            {/* Theme Toggle */}
-            <button
-              onClick={toggleTheme}
-              className="p-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-            >
-              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-
+          <div className="px-4 pb-5 pt-2 space-y-2.5 border-t border-zinc-100 dark:border-zinc-900 mt-1">
             <Link
               href="/login"
-              className="px-4 py-2 text-black dark:text-white hover:underline transition"
+              onClick={closeMenu}
+              className="flex items-center justify-center w-full py-3 text-sm font-semibold text-black dark:text-white border border-zinc-200 dark:border-zinc-800 rounded-xl hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors active:scale-[0.98]"
             >
               Sign In
             </Link>
             <Link
               href="/signup"
-              className="px-4 py-2 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition"
+              onClick={closeMenu}
+              className="flex items-center justify-center w-full py-3 text-sm font-semibold bg-black dark:bg-white text-white dark:text-black rounded-xl hover:opacity-85 transition-opacity active:scale-[0.98]"
             >
               Get Started
             </Link>
           </div>
-
-          {/* Mobile Menu Button */}
-          <div className="flex items-center gap-2 md:hidden">
-            {/* Theme Toggle - Mobile */}
-            <button
-              onClick={toggleTheme}
-              className="p-2 rounded-lg text-black dark:text-white hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-            >
-              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-
-            <button
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="p-2 rounded-lg text-black dark:text-white hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-            >
-              {mobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
-            </button>
-          </div>
         </div>
+      </header>
 
-        {/* Mobile Menu */}
-        {mobileMenuOpen && (
-          <div className="md:hidden py-4 border-t border-gray-200 dark:border-gray-800">
-            <div className="flex flex-col space-y-4">
-              {navLinks.map((link) => (
-                <a
-                  key={link.name}
-                  href={link.href}
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="text-gray-600 dark:text-gray-300 hover:text-black dark:hover:text-white transition-colors py-2"
-                >
-                  {link.name}
-                </a>
-              ))}
-              <div className="flex flex-col space-y-3 pt-4 border-t border-gray-200 dark:border-gray-800">
-                <Link
-                  href="/login"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="px-4 py-2 text-center text-black dark:text-white border border-gray-300 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition"
-                >
-                  Sign In
-                </Link>
-                <Link
-                  href="/signup"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="px-4 py-2 text-center bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition"
-                >
-                  Get Started
-                </Link>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </nav>
+      {/* Backdrop — outside header so it covers full screen */}
+      {menuOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/20 dark:bg-black/40 backdrop-blur-[2px] md:hidden"
+          onClick={closeMenu}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Spacer */}
+      <div className="h-16" />
+    </>
   );
 }
