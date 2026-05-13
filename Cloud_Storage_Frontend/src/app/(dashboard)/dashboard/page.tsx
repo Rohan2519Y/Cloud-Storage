@@ -1,7 +1,7 @@
 'use client'
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   Files,
   HardDrive,
@@ -14,12 +14,44 @@ import {
   FileText,
   FileImage,
   FileVideo,
+  FileAudio,
   FileArchive,
   File,
   Download,
-  Eye,
 } from "lucide-react";
 import apiService from "@/services/api";
+
+// ---------- static helpers (outside component for stability) ----------
+const formatFileSize = (bytes: number) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+};
+
+const formatDate = (dateStr: string) => {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
+const getFileIcon = (mimeType: string) => {
+  if (mimeType?.startsWith('image/')) return FileImage;
+  if (mimeType?.startsWith('video/')) return FileVideo;
+  if (mimeType?.startsWith('audio/')) return FileAudio; // fixed
+  if (mimeType?.includes('zip') || mimeType?.includes('rar')) return FileArchive;
+  if (mimeType?.includes('pdf') || mimeType?.includes('doc') || mimeType?.includes('txt')) return FileText;
+  return File;
+};
 
 interface DashboardStats {
   totalFiles: number;
@@ -52,19 +84,7 @@ export default function Dashboard() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    setMounted(true);
-    const userData = sessionStorage.getItem('telegram_user_account');
-    if (userData) {
-      setUser(JSON.parse(userData));
-      apiService.initToken();
-      fetchDashboardData();
-    } else {
-      router.push('/login');
-    }
-  }, [router]);
-
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = useCallback(async () => {
     try {
       const [statsData, filesData, channelsData] = await Promise.all([
         apiService.getStats(),
@@ -80,38 +100,19 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const formatFileSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-  };
-
-  const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  };
-
-  const getFileIcon = (mimeType: string) => {
-    if (mimeType?.startsWith('image/')) return FileImage;
-    if (mimeType?.startsWith('video/')) return FileVideo;
-    if (mimeType?.startsWith('audio/')) return FileImage;
-    if (mimeType?.includes('zip') || mimeType?.includes('rar')) return FileArchive;
-    if (mimeType?.includes('pdf') || mimeType?.includes('doc') || mimeType?.includes('txt')) return FileText;
-    return File;
-  };
+  useEffect(() => {
+    setMounted(true);
+    const userData = sessionStorage.getItem('telegram_user_account');
+    if (userData) {
+      setUser(JSON.parse(userData));
+      apiService.initToken();
+      fetchDashboardData();
+    } else {
+      router.push('/login');
+    }
+  }, [router, fetchDashboardData]);
 
   if (!mounted) return null;
 
@@ -234,9 +235,13 @@ export default function Dashboard() {
                           apiService.downloadFileAsBlob(file.telegram_message_id).then(blob => {
                             const url = URL.createObjectURL(blob);
                             const a = document.createElement('a');
-                            a.href = url; a.download = file.original_name;
+                            a.href = url;
+                            a.download = file.original_name;
+                            document.body.appendChild(a);
                             a.click();
-                            URL.revokeObjectURL(url);
+                            a.remove();
+                            // delayed revoke to ensure download initiates
+                            setTimeout(() => URL.revokeObjectURL(url), 1000);
                           });
                         }}
                         className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 hover:text-black dark:hover:text-white"

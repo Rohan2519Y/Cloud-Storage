@@ -1,13 +1,81 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import apiService from '@/services/api';
 import Image from 'next/image';
+import apiService from '@/services/api';
 import Telegram1 from '../../../assets/Telegram1.jpg';
 import Telegram2 from '../../../assets/Telegram2.jpg';
 import Telegram3 from '../../../assets/Telegram3.jpg';
+
+// ---------- Static Guide Images (moved outside component) ----------
+const stepOneImages = (
+  <div className="space-y-4">
+    {[
+      {
+        src: Telegram1,
+        alt: 'Step 1: Go to my.telegram.org/apps and login',
+        caption: '📖 How to get your API ID & Hash — visit ',
+        link: 'https://my.telegram.org/apps',
+        linkText: 'my.telegram.org/apps'
+      },
+      {
+        src: Telegram2,
+        alt: 'Step 2: Create a new app or use existing one',
+        caption: '📖 Step 2 — Create an app or use existing one'
+      },
+      {
+        src: Telegram3,
+        alt: 'Step 3: Copy your API ID and API Hash',
+        caption: '📖 Step 3 — Copy your API ID and API Hash'
+      }
+    ].map(({ src, alt, caption, link, linkText }, idx) => (
+      <div key={idx} className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+        <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
+          {caption}
+          {link && (
+            <a href={link} target="_blank" rel="noopener noreferrer" className="text-blue-500 underline ml-1">
+              {linkText}
+            </a>
+          )}
+        </p>
+        <Image src={src} alt={alt} className="w-full h-auto object-contain" />
+      </div>
+    ))}
+  </div>
+);
+
+const stepTwoImages = (
+  <div className="space-y-4">
+    {[
+      {
+        src: Telegram1,
+        alt: 'Enter your phone number at my.telegram.org',
+        caption: '📖 Step 1 — Enter your phone number at ',
+        link: 'https://my.telegram.org',
+        linkText: 'my.telegram.org'
+      },
+      {
+        src: Telegram2,
+        alt: 'Copy the confirmation code from your Telegram app',
+        caption: '📖 Step 2 — Copy the confirmation code sent to your Telegram app'
+      }
+    ].map(({ src, alt, caption, link, linkText }, idx) => (
+      <div key={idx} className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+        <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
+          {caption}
+          {link && (
+            <a href={link} target="_blank" rel="noopener noreferrer" className="text-blue-500 underline ml-1">
+              {linkText}
+            </a>
+          )}
+        </p>
+        <Image src={src} alt={alt} className="w-full h-auto object-contain" />
+      </div>
+    ))}
+  </div>
+);
 
 export default function SignupPage() {
   const router = useRouter();
@@ -32,24 +100,29 @@ export default function SignupPage() {
     }
   }, [router]);
 
-  const handleSendCode = async (e: React.FormEvent) => {
+  const handleSendCode = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
+    let abort = false;
     try {
       const response = await apiService.sendCode(phoneNumber, parseInt(apiId), apiHash);
+      if (abort) return;
       if (response.success) setStep(2);
     } catch (err: any) {
+      if (abort) return;
       setError(err.response?.data?.error || err.message || 'Failed to send verification code');
     } finally {
-      setLoading(false);
+      if (!abort) setLoading(false);
     }
-  };
+    return () => { abort = true; };
+  }, [phoneNumber, apiId, apiHash]);
 
-  const handleVerifyCode = async (e: React.FormEvent) => {
+  const handleVerifyCode = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
+    let abort = false;
     try {
       const response = await apiService.verifyCode(
         phoneNumber,
@@ -57,6 +130,7 @@ export default function SignupPage() {
         channelUsername || undefined,
         undefined
       );
+      if (abort) return;
       if (response.success) {
         apiService.setToken(response.token);
         sessionStorage.setItem('temp_token', response.token);
@@ -64,27 +138,33 @@ export default function SignupPage() {
         setStep(3);
       }
     } catch (err: any) {
+      if (abort) return;
       setError(err.response?.data?.error || err.message || 'Verification failed');
     } finally {
-      setLoading(false);
+      if (!abort) setLoading(false);
     }
-  };
+    return () => { abort = true; };
+  }, [phoneNumber, verificationCode, channelUsername]);
 
-  const handleCompleteProfile = async (e: React.FormEvent) => {
+  const handleCompleteProfile = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (password !== confirmPassword) { setError('Passwords do not match'); return; }
     if (password.length < 6) { setError('Password must be at least 6 characters'); return; }
     setLoading(true);
     setError('');
+    let abort = false;
     try {
       const response = await apiService.completeProfile(email, password);
+      if (abort) return;
       if (response.success) router.push('/dashboard');
     } catch (err: any) {
+      if (abort) return;
       setError(err.response?.data?.error || err.message || 'Profile completion failed');
     } finally {
-      setLoading(false);
+      if (!abort) setLoading(false);
     }
-  };
+    return () => { abort = true; };
+  }, [email, password, confirmPassword, router]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black py-12">
@@ -101,55 +181,18 @@ export default function SignupPage() {
         {/* STEP 1 */}
         {step === 1 && (
           <form onSubmit={handleSendCode} className="space-y-6">
-            {/* Guide images for API ID & Hash */}
-            <div className="space-y-4">
-              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
-                  📖 How to get your API ID & Hash — visit{' '}
-                  <a href="https://my.telegram.org/apps" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">
-                    my.telegram.org/apps
-                  </a>
-                </p>
-                <Image
-                  src={Telegram1}
-                  alt="Step 1: Go to my.telegram.org/apps and login"
-                  className="w-full h-auto object-contain"
-                  priority
-                />
-              </div>
-
-              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
-                  📖 Step 2 — Create an app or use existing one
-                </p>
-                <Image
-                  src={Telegram2}
-                  alt="Step 2: Create a new app or use existing one"
-                  className="w-full h-auto object-contain"
-                />
-              </div>
-
-              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
-                  📖 Step 3 — Copy your API ID and API Hash
-                </p>
-                <Image
-                  src={Telegram3}
-                  alt="Step 3: Copy your API ID and API Hash"
-                  className="w-full h-auto object-contain rounded-b-lg"
-                />
-              </div>
-            </div>
+            {stepOneImages}
 
             <div>
               <label className="block text-sm font-medium text-black dark:text-white mb-2">
                 Telegram Phone Number
               </label>
               <input
-                type="text"
+                type="tel"
                 value={phoneNumber}
                 onChange={(e) => setPhoneNumber(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="tel"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="+1234567890"
                 required
               />
@@ -164,7 +207,8 @@ export default function SignupPage() {
                 type="text"
                 value={apiId}
                 onChange={(e) => setApiId(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="off"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="Get from my.telegram.org/apps"
                 required
               />
@@ -178,7 +222,8 @@ export default function SignupPage() {
                 type="text"
                 value={apiHash}
                 onChange={(e) => setApiHash(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="off"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="32-character hash"
                 required
               />
@@ -192,7 +237,8 @@ export default function SignupPage() {
                 type="text"
                 value={channelUsername}
                 onChange={(e) => setChannelUsername(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="off"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="@yourchannel"
               />
               <p className="mt-1 text-xs text-gray-500">Your channel where files will be stored</p>
@@ -207,7 +253,7 @@ export default function SignupPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50"
+              className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 text-sm"
             >
               {loading ? 'Sending Code...' : 'Send Verification Code'}
             </button>
@@ -217,33 +263,7 @@ export default function SignupPage() {
         {/* STEP 2 */}
         {step === 2 && (
           <form onSubmit={handleVerifyCode} className="space-y-6">
-            {/* Guide images for phone number entry + confirmation code */}
-            <div className="space-y-4">
-              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
-                  📖 Step 1 — Enter your phone number at{' '}
-                  <a href="https://my.telegram.org" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">
-                    my.telegram.org
-                  </a>
-                </p>
-                <Image
-                  src={Telegram1}
-                  alt="Enter your phone number in international format on my.telegram.org"
-                  className="w-full h-auto object-contain"
-                />
-              </div>
-
-              <div className="rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
-                <p className="text-xs text-gray-500 dark:text-gray-400 px-3 pt-2 pb-1 bg-gray-50 dark:bg-gray-900 font-medium">
-                  📖 Step 2 — Copy the confirmation code sent to your Telegram app
-                </p>
-                <Image
-                  src={Telegram2}
-                  alt="Copy the confirmation code from your Telegram app and enter it"
-                  className="w-full h-auto object-contain"
-                />
-              </div>
-            </div>
+            {stepTwoImages}
 
             <div>
               <label className="block text-sm font-medium text-black dark:text-white mb-2">
@@ -253,7 +273,8 @@ export default function SignupPage() {
                 type="text"
                 value={verificationCode}
                 onChange={(e) => setVerificationCode(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="one-time-code"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="Enter 5-digit code"
                 required
               />
@@ -270,14 +291,14 @@ export default function SignupPage() {
               <button
                 type="button"
                 onClick={() => setStep(1)}
-                className="flex-1 py-3 border border-gray-300 dark:border-gray-700 text-black dark:text-white rounded-lg font-medium hover:bg-gray-50 dark:hover:bg-gray-900 transition"
+                className="flex-1 py-3 border border-gray-300 dark:border-gray-700 text-black dark:text-white rounded-lg font-medium hover:bg-gray-50 dark:hover:bg-gray-900 transition text-sm"
               >
                 Back
               </button>
               <button
                 type="submit"
                 disabled={loading}
-                className="flex-1 py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50"
+                className="flex-1 py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 text-sm"
               >
                 {loading ? 'Verifying...' : 'Verify & Continue'}
               </button>
@@ -296,7 +317,8 @@ export default function SignupPage() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="email"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="you@example.com"
                 required
               />
@@ -310,7 +332,8 @@ export default function SignupPage() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="new-password"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="Minimum 6 characters"
                 required
               />
@@ -324,7 +347,8 @@ export default function SignupPage() {
                 type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white"
+                autoComplete="new-password"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
                 placeholder="Confirm your password"
                 required
               />
@@ -339,7 +363,7 @@ export default function SignupPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50"
+              className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 text-sm"
             >
               {loading ? 'Creating Account...' : 'Complete Sign Up'}
             </button>

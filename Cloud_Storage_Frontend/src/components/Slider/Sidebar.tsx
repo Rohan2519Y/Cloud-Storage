@@ -195,7 +195,7 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
                 {/* Collapse toggle - desktop only */}
                 <button
                     onClick={() => setCollapsed(!collapsed)}
-                    className="cursor-pointer absolute -right-3 top-10 hidden h-6 w-6 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-400 hover:text-black dark:border-zinc-800 dark:bg-white dark:text-zinc-900 dark:hover:text-blue-600 lg:flex"
+                    className="cursor-pointer absolute -right-3 top-13 hidden h-6 w-6 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-400 hover:text-black dark:border-zinc-800 dark:bg-white dark:text-zinc-900 dark:hover:text-blue-600 lg:flex"
                 >
                     {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
                 </button>

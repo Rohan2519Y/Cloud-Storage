@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
     Upload,
     Search,
@@ -22,13 +22,33 @@ import {
     Folder,
     FolderOpen,
     ChevronRight,
-    ChevronDown,
     Plus,
-    ArrowLeft,
-    MoreVertical,
 } from 'lucide-react'
 import apiService from '../../../../services/api'
 
+// ---------- static helpers ----------
+const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+const formatDate = (dateStr: string) => {
+    const date = new Date(dateStr)
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+const getFileIcon = (mimeType: string) => {
+    if (mimeType?.startsWith('image/')) return FileImage
+    if (mimeType?.startsWith('video/')) return FileVideo
+    if (mimeType?.startsWith('audio/')) return FileAudio
+    if (mimeType?.includes('zip') || mimeType?.includes('rar') || mimeType?.includes('tar')) return FileArchive
+    if (mimeType?.includes('pdf') || mimeType?.includes('doc') || mimeType?.includes('txt')) return FileText
+    return File
+}
+
+// ---------- types ----------
 interface FileItem {
     id: string
     original_name: string
@@ -72,42 +92,59 @@ export default function FilesPage() {
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null)
     const [selectedFile, setSelectedFile] = useState<File | null>(null)
     const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({})
+
     const fileInputRef = useRef<HTMLInputElement>(null)
     const xhrRef = useRef<XMLHttpRequest | null>(null)
     const evtSourceRef = useRef<EventSource | null>(null)
     const uploadIdRef = useRef<string>('')
     const tokenRef = useRef<string>('')
+    const uploadActiveRef = useRef(false)          // tracks if upload is in progress
+    const thumbnailUrlMapRef = useRef<Record<string, string>>({}) // keep a copy for cleanup
 
-    const fetchFolders = async () => {
+    const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+
+    // ---------- token initialisation ----------
+    useEffect(() => {
+        apiService.initToken()
+        tokenRef.current = apiService.getToken() || sessionStorage.getItem('token') || ''
+    }, [])
+
+    const getToken = useCallback(() => tokenRef.current, [])
+
+    // ---------- API helpers (useCallback) ----------
+    const fetchFolders = useCallback(async () => {
         try {
-            const token = apiService.getToken() || sessionStorage.getItem('token');
-            console.log('Using token:', token);
-            const res = await fetch(`${apiService['baseUrl']}/api/folders?parent_id=${currentFolder || 'null'}`, {
-                headers: { 'Authorization': `Bearer ${apiService.getToken()}` }
+            const res = await fetch(`${BASE}/api/folders?parent_id=${currentFolder || 'null'}`, {
+                headers: { Authorization: `Bearer ${getToken()}` }
             })
             const data = await res.json()
             if (data.success) setFolders(data.folders || [])
         } catch (err) { console.error('Failed to fetch folders:', err) }
-    }
+    }, [currentFolder, getToken, BASE])
 
-    const fetchFiles = async () => {
+    const fetchFiles = useCallback(async () => {
         try {
-            const res = await fetch(`${apiService['baseUrl']}/api/files?folder_id=${currentFolder || 'null'}`, {
-                headers: { 'Authorization': `Bearer ${apiService.getToken()}` }
+            const res = await fetch(`${BASE}/api/files?folder_id=${currentFolder || 'null'}`, {
+                headers: { Authorization: `Bearer ${getToken()}` }
             })
             const data = await res.json()
             if (data.success) {
                 setFiles(data.files || [])
+                // load thumbnails only for new images
                 data.files?.forEach((file: FileItem) => {
                     if (file.mime_type?.startsWith('image/') && !thumbnailUrls[file.telegram_message_id]) {
                         loadThumbnail(file.telegram_message_id)
                     }
                 })
             }
-        } catch (err) { console.error('Failed to fetch files:', err) } finally { setLoading(false) }
-    }
+        } catch (err) {
+            console.error('Failed to fetch files:', err)
+        } finally {
+            setLoading(false)
+        }
+    }, [currentFolder, getToken, BASE, thumbnailUrls]) // thumbnailUrls needed because of dependency inside
 
-    const fetchChannels = async () => {
+    const fetchChannels = useCallback(async () => {
         try {
             const data = await apiService.getChannels()
             if (data.success) {
@@ -115,22 +152,32 @@ export default function FilesPage() {
                 if (data.channels?.length > 0) setSelectedChannel(data.channels[0].channel_id)
             }
         } catch (err) { console.error('Failed to fetch channels:', err) }
-    }
+    }, [])
 
-    const fetchFolderPath = async (folderId: string) => {
+    const fetchFolderPath = useCallback(async (folderId: string) => {
         try {
-            const res = await fetch(`${apiService['baseUrl']}/api/folders/path/${folderId}`, {
-                headers: { 'Authorization': `Bearer ${apiService.getToken()}` }
+            const res = await fetch(`${BASE}/api/folders/path/${folderId}`, {
+                headers: { Authorization: `Bearer ${getToken()}` }
             })
             const data = await res.json()
             if (data.success) setFolderPath(data.path || [])
-        } catch (err) { }
-    }
+        } catch (err) { /* ignore */ }
+    }, [getToken, BASE])
 
-    useEffect(() => {
-        apiService.initToken()
-        fetchChannels()
+    // ---------- thumbnail loading ----------
+    const loadThumbnail = useCallback(async (messageId: string) => {
+        try {
+            const blob = await apiService.downloadFileAsBlob(messageId)
+            const url = URL.createObjectURL(blob)
+            thumbnailUrlMapRef.current[messageId] = url
+            setThumbnailUrls(prev => ({ ...prev, [messageId]: url }))
+        } catch (err) { /* ignore thumbnail errors */ }
     }, [])
+
+    // ---------- effects ----------
+    useEffect(() => {
+        fetchChannels()
+    }, [fetchChannels])
 
     useEffect(() => {
         setLoading(true)
@@ -138,24 +185,40 @@ export default function FilesPage() {
         fetchFiles()
         if (currentFolder) fetchFolderPath(currentFolder)
         else setFolderPath([])
-    }, [currentFolder])
+    }, [currentFolder, fetchFolders, fetchFiles, fetchFolderPath])
 
-    const loadThumbnail = async (messageId: string) => {
-        try {
-            const blob = await apiService.downloadFileAsBlob(messageId)
-            const url = URL.createObjectURL(blob)
-            setThumbnailUrls(prev => ({ ...prev, [messageId]: url }))
-        } catch (err) { }
-    }
+    // ---------- cleanup blob URLs on unmount ----------
+    useEffect(() => {
+        const urls = thumbnailUrlMapRef.current
+        return () => {
+            Object.values(urls).forEach(url => URL.revokeObjectURL(url))
+        }
+    }, [])
 
+    // ---------- abort upload on unmount ----------
+    useEffect(() => {
+        return () => {
+            if (uploadActiveRef.current) {
+                xhrRef.current?.abort()
+                evtSourceRef.current?.close()
+                // best-effort cancel on server
+                const token = tokenRef.current
+                if (uploadIdRef.current && token) {
+                    navigator.sendBeacon(`${BASE}/api/upload-cancel/${uploadIdRef.current}?token=${token}`, '')
+                }
+            }
+        }
+    }, [BASE])
+
+    // ---------- folder operations ----------
     const handleCreateFolder = async () => {
         if (!newFolderName.trim()) return
         try {
-            const res = await fetch(`${apiService['baseUrl']}/api/folders`, {
+            const res = await fetch(`${BASE}/api/folders`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiService.getToken()}`
+                    Authorization: `Bearer ${getToken()}`
                 },
                 body: JSON.stringify({ name: newFolderName, parent_id: currentFolder })
             })
@@ -178,33 +241,27 @@ export default function FilesPage() {
         setCurrentFolder(folderId)
     }
 
-    const formatFileSize = (bytes: number) => {
-        if (bytes < 1024) return `${bytes} B`
-        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-        if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-        return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+    const handleDeleteFolder = async (folderId: string) => {
+        if (!confirm('Delete this folder and all its contents?')) return
+        try {
+            const res = await fetch(`${BASE}/api/folders/${folderId}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${getToken()}` }
+            })
+            const data = await res.json()
+            if (data.success) {
+                setFolders(folders.filter(f => f.id !== folderId))
+                setMessage({ type: 'success', text: 'Folder deleted' })
+            }
+        } catch (err: any) { setMessage({ type: 'error', text: err.message }) }
     }
 
-    const formatDate = (dateStr: string) => {
-        const date = new Date(dateStr)
-        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })
-    }
-
-    const getFileIcon = (mimeType: string) => {
-        if (mimeType?.startsWith('image/')) return FileImage
-        if (mimeType?.startsWith('video/')) return FileVideo
-        if (mimeType?.startsWith('audio/')) return FileAudio
-        if (mimeType?.includes('zip') || mimeType?.includes('rar') || mimeType?.includes('tar')) return FileArchive
-        if (mimeType?.includes('pdf') || mimeType?.includes('doc') || mimeType?.includes('txt')) return FileText
-        return File
-    }
-
+    // ---------- file operations ----------
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
         if (file) setSelectedFile(file)
     }
 
-    const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
     const handleUpload = async (e: React.FormEvent) => {
         e.preventDefault()
         const fileInput = fileInputRef.current
@@ -212,28 +269,31 @@ export default function FilesPage() {
         const file = fileInput.files[0]
         const uploadId = crypto.randomUUID()
         uploadIdRef.current = uploadId
+        const token = getToken()
+        tokenRef.current = token
 
+        uploadActiveRef.current = true
         setUploading(true)
         setUploadProgress(0)
         setMessage(null)
 
-        const token = sessionStorage.getItem('token') || localStorage.getItem('token')
-        tokenRef.current = token || ''
-
-        // ── Step 1: connect to SSE progress BEFORE sending file ──
-        const evtSource = new EventSource(
-            `${BASE}/api/upload-progress/${uploadId}?token=${token}`
-        )
+        // SSE for progress
+        const evtSource = new EventSource(`${BASE}/api/upload-progress/${uploadId}?token=${token}`)
         evtSource.onmessage = (e) => {
             const data = JSON.parse(e.data)
             setUploadProgress(data.progress)
             if (data.progress >= 100) {
                 evtSource.close()
+                uploadActiveRef.current = false
             }
         }
-        evtSource.onerror = () => evtSource.close()
+        evtSource.onerror = () => {
+            evtSource.close()
+            uploadActiveRef.current = false
+        }
         evtSourceRef.current = evtSource
-        // ── Step 2: send file via XHR (no progress listener needed) ──
+
+        // XHR to send file
         const xhr = new XMLHttpRequest()
         xhrRef.current = xhr
 
@@ -248,6 +308,7 @@ export default function FilesPage() {
 
         xhr.addEventListener('load', () => {
             evtSource.close()
+            uploadActiveRef.current = false
             try {
                 const data = JSON.parse(xhr.responseText)
                 if (data.success) {
@@ -268,12 +329,14 @@ export default function FilesPage() {
 
         xhr.addEventListener('error', () => {
             evtSource.close()
+            uploadActiveRef.current = false
             setMessage({ type: 'error', text: 'Network error' })
             setUploading(false)
         })
 
         xhr.addEventListener('abort', () => {
             evtSource.close()
+            uploadActiveRef.current = false
             setUploading(false)
             setUploadProgress(0)
         })
@@ -297,7 +360,10 @@ export default function FilesPage() {
     const handleView = async (messageId: string) => {
         try {
             const blob = await apiService.downloadFileAsBlob(messageId)
-            window.open(window.URL.createObjectURL(blob), '_blank')
+            const url = window.URL.createObjectURL(blob)
+            window.open(url, '_blank')
+            // revoke after a short delay to allow the new tab to load
+            setTimeout(() => window.URL.revokeObjectURL(url), 5000)
         } catch (err: any) { setMessage({ type: 'error', text: err.message }) }
     }
 
@@ -312,21 +378,7 @@ export default function FilesPage() {
         } catch (err: any) { setMessage({ type: 'error', text: err.message }) }
     }
 
-    const handleDeleteFolder = async (folderId: string) => {
-        if (!confirm('Delete this folder and all its contents?')) return
-        try {
-            const res = await fetch(`${apiService['baseUrl']}/api/folders/${folderId}`, {
-                method: 'DELETE',
-                headers: { 'Authorization': `Bearer ${apiService.getToken()}` }
-            })
-            const data = await res.json()
-            if (data.success) {
-                setFolders(folders.filter(f => f.id !== folderId))
-                setMessage({ type: 'success', text: 'Folder deleted' })
-            }
-        } catch (err: any) { setMessage({ type: 'error', text: err.message }) }
-    }
-
+    // ---------- sorting & display ----------
     const sortedItems = [
         ...folders.map(f => ({ ...f, type: 'folder' as const })),
         ...files.map(f => ({ ...f, type: 'file' as const })),
@@ -339,6 +391,7 @@ export default function FilesPage() {
 
     const totalSize = files.reduce((acc, f) => acc + f.file_size, 0)
 
+    // ---------- render ----------
     return (
         <div className="p-6 lg:p-10">
             {/* Header */}
@@ -352,13 +405,13 @@ export default function FilesPage() {
                 <div className="flex gap-2">
                     <button
                         onClick={() => setShowNewFolder(true)}
-                        className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 dark:border-zinc-800 px-4 py-2.5 text-sm font-medium text-black dark:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900"
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-zinc-200 dark:border-zinc-800 px-4 py-2.5 text-sm font-medium text-black dark:text-white hover:bg-zinc-100 dark:hover:bg-zinc-900"
                     >
                         <Plus size={18} /> New Folder
                     </button>
                     <button
                         onClick={() => setShowUpload(!showUpload)}
-                        className="inline-flex items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-sm font-semibold text-white hover:bg-zinc-800 dark:bg-white dark:text-black dark:hover:bg-zinc-200"
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-sm font-semibold text-white hover:bg-zinc-800 dark:bg-white dark:text-black dark:hover:bg-zinc-200"
                     >
                         <Upload size={18} /> Upload
                     </button>
@@ -369,7 +422,7 @@ export default function FilesPage() {
             <div className="flex items-center gap-2 mb-6 text-sm">
                 <button
                     onClick={goBack}
-                    className={`flex items-center gap-1 rounded-lg px-3 py-1.5 font-medium transition-colors ${!currentFolder ? 'bg-black text-white dark:bg-white dark:text-black' : 'text-zinc-500 hover:text-black dark:hover:text-white'}`}
+                    className={`flex cursor-pointer items-center gap-1 rounded-lg px-3 py-1.5 font-medium transition-colors ${!currentFolder ? 'bg-black text-white dark:bg-white dark:text-black' : 'text-zinc-500 hover:text-black dark:hover:text-white'}`}
                 >
                     <Folder size={16} /> Home
                 </button>
@@ -435,7 +488,7 @@ export default function FilesPage() {
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Choose File</label>
-                            <input ref={fileInputRef} type="file" onChange={handleFileSelect} className="w-full rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-black px-4 py-2.5 text-sm text-black dark:text-white file:mr-4 file:rounded-lg file:border-0 file:bg-black file:px-4 file:py-1.5 file:text-xs file:font-semibold file:text-white dark:file:bg-white dark:file:text-black" />
+                            <input ref={fileInputRef} type="file" onChange={handleFileSelect} className="w-full cursor-pointer rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-black px-4 py-2.5 text-sm text-black dark:text-white file:mr-4 file:rounded-lg file:border-0 file:bg-black file:px-4 file:py-1.5 file:text-xs file:font-semibold file:text-white dark:file:bg-white dark:file:text-black" />
                         </div>
                         {selectedFile && (
                             <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4">
@@ -472,7 +525,7 @@ export default function FilesPage() {
                                         {uploadProgress}% Uploaded
                                     </span>
                                 ) : (
-                                    <span className="flex items-center justify-center gap-2">
+                                    <span className="flex cursor-pointer items-center justify-center gap-2">
                                         <Upload size={18} /> Upload File
                                     </span>
                                 )}
@@ -483,7 +536,10 @@ export default function FilesPage() {
                                     onClick={() => {
                                         xhrRef.current?.abort()
                                         evtSourceRef.current?.close()
-                                        fetch(`${BASE}/api/upload-cancel/${uploadIdRef.current}?token=${tokenRef.current}`, { method: 'POST' })
+                                        const cancelToken = tokenRef.current
+                                        if (uploadIdRef.current && cancelToken) {
+                                            fetch(`${BASE}/api/upload-cancel/${uploadIdRef.current}?token=${cancelToken}`, { method: 'POST' })
+                                        }
                                         setUploading(false)
                                         setUploadProgress(0)
                                         setSelectedFile(null)

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import apiService from '@/services/api';
@@ -19,25 +19,30 @@ export default function LoginPage() {
     }
   }, [router]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
 
+    let abort = false;
     try {
       const response = await apiService.loginWithEmail(emailOrPhone, password);
 
+      if (abort) return;
       if (response.success) {
         apiService.setToken(response.token);
         sessionStorage.setItem('telegram_user_account', JSON.stringify(response.user));
         router.push('/dashboard');
       }
     } catch (err: any) {
+      if (abort) return;
       setError(err.response?.data?.error || err.message || 'Login failed');
     } finally {
-      setLoading(false);
+      if (!abort) setLoading(false);
     }
-  };
+
+    return () => { abort = true; };
+  }, [emailOrPhone, password, router]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
@@ -60,6 +65,7 @@ export default function LoginPage() {
               type="text"
               value={emailOrPhone}
               onChange={(e) => setEmailOrPhone(e.target.value)}
+              autoComplete="username"
               className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent transition"
               placeholder="Enter your email or phone"
               required
@@ -74,6 +80,7 @@ export default function LoginPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
               className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent transition"
               placeholder="Enter your password"
               required

@@ -25,15 +25,7 @@ export default function DashboardLayout({
             <div className={`flex-1 transition-all duration-300 ${collapsed ? 'lg:ml-[70px]' : 'lg:ml-[260px]'}`}>
                 {/* Header */}
                 <header className="sticky top-0 z-30 border-b border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-black/80 backdrop-blur-sm">
-                    <div className="flex h-16 items-center justify-between px-6 lg:px-10">
-                        <div className="flex items-center gap-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-4 py-2 w-80">
-                            <Search size={18} className="text-zinc-400" />
-                            <input
-                                type="text"
-                                placeholder="Search files..."
-                                className="flex-1 bg-transparent text-sm text-black dark:text-white placeholder-zinc-400 outline-none"
-                            />
-                        </div>
+                    <div className="flex h-16 items-center justify-end px-6 lg:px-10">
 
                         <div className="flex items-center gap-4">
                             <button className="relative rounded-lg p-2 text-zinc-500 hover:bg-zinc-100 hover:text-black dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-white transition-colors">
