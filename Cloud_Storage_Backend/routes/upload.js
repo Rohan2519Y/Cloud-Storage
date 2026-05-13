@@ -500,4 +500,50 @@ router.get('/folders/path/:id', authenticateUser, async (req, res) => {
     res.json({ success: true, path });
 });
 
+// ─── RENAME FILE ────────────────────────────────────────────────────────────
+router.put('/files/:id/rename', authenticateUser, async (req, res) => {
+    try {
+        const { newName } = req.body;
+        if (!newName || !newName.trim()) {
+            return res.status(400).json({ error: 'New name required' });
+        }
+
+        const [result] = await pool.execute(
+            'UPDATE uploaded_files SET original_name = ? WHERE id = ? AND user_id = ?',
+            [newName.trim(), req.params.id, req.user.id]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        res.json({ success: true, message: 'File renamed' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── RENAME FOLDER ──────────────────────────────────────────────────────────
+router.put('/folders/:id/rename', authenticateUser, async (req, res) => {
+    try {
+        const { newName } = req.body;
+        if (!newName || !newName.trim()) {
+            return res.status(400).json({ error: 'New name required' });
+        }
+
+        const [result] = await pool.execute(
+            'UPDATE folders SET name = ? WHERE id = ? AND user_id = ?',
+            [newName.trim(), req.params.id, req.user.id]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Folder not found' });
+        }
+
+        res.json({ success: true, message: 'Folder renamed' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;
