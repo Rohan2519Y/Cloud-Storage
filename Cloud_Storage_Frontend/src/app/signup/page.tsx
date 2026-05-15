@@ -82,13 +82,13 @@ export default function SignupPage() {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  
+
   const [phoneNumber, setPhoneNumber] = useState('');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
   const [channelUsername, setChannelUsername] = useState('');
   const [verificationCode, setVerificationCode] = useState('');
-  
+  const [twoFAPassword, setTwoFAPassword] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -121,14 +121,20 @@ export default function SignupPage() {
   const handleVerifyCode = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setError('');
+    setError(''); 
+    console.log('2FA password received:', JSON.stringify(twoFAPassword));
+    console.log('2FA password type:', typeof twoFAPassword);
+    console.log('2FA password length:', twoFAPassword?.length);
     let abort = false;
     try {
+      const isId = channelUsername.startsWith('-') || /^\d+$/.test(channelUsername.trim());
+
       const response = await apiService.verifyCode(
         phoneNumber,
         parseInt(verificationCode),
-        channelUsername || undefined,
-        undefined
+        (!channelUsername || isId) ? undefined : channelUsername,  // groupUsername
+        (channelUsername && isId) ? channelUsername : undefined,   // groupId
+        twoFAPassword || undefined,
       );
       if (abort) return;
       if (response.success) {
@@ -144,7 +150,7 @@ export default function SignupPage() {
       if (!abort) setLoading(false);
     }
     return () => { abort = true; };
-  }, [phoneNumber, verificationCode, channelUsername]);
+  }, [phoneNumber, verificationCode, channelUsername, twoFAPassword]);
 
   const handleCompleteProfile = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
@@ -279,6 +285,22 @@ export default function SignupPage() {
                 required
               />
               <p className="mt-1 text-xs text-gray-500">Check your Telegram app for the code</p>
+            </div>
+
+            {/* ADD THIS NEW FIELD */}
+            <div>
+              <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                2FA Password (if enabled)
+              </label>
+              <input
+                type="password"
+                value={twoFAPassword}
+                onChange={(e) => setTwoFAPassword(e.target.value)}
+                autoComplete="off"
+                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
+                placeholder="Leave empty if not set"
+              />
+              <p className="mt-1 text-xs text-gray-500">Only needed if you have 2-step verification enabled</p>
             </div>
 
             {error && (

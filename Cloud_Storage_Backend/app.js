@@ -1,4 +1,4 @@
-// app.js — production-ready for Render free tier
+// app.js — production-ready with @mtcute/node
 const express = require('express');
 const path = require('path');
 const cookieParser = require('cookie-parser');
@@ -23,7 +23,6 @@ app.use((req, res, next) => {
 app.use(cors());
 
 // ─── Body parsing ──────────────────────────────────────────────────────────
-// Limit JSON body to 10MB (files come via multipart, not JSON)
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 app.use(cookieParser());
@@ -32,7 +31,6 @@ app.use(cookieParser());
 if (process.env.NODE_ENV !== 'production') {
     app.use(logger('dev'));
 } else {
-    // In production, only log errors
     app.use(logger('combined', {
         skip: (req, res) => res.statusCode < 400,
     }));

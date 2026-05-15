@@ -113,7 +113,7 @@ class ApiService {
         });
     }
 
-    async verifyCode(phoneNumber: string, code: number, groupUsername?: string, groupId?: string) {
+    async verifyCode(phoneNumber: string, code: number, groupUsername?: string, groupId?: string, password?: string) {
         return this.request<{
             success: boolean;
             token: string;
@@ -121,7 +121,7 @@ class ApiService {
             channels: any[];
         }>('/api/auth/verify', {
             method: 'POST',
-            body: { phoneNumber, code, groupUsername, groupId },
+            body: { phoneNumber, code, groupUsername, groupId, password },
         });
     }
 
@@ -219,6 +219,12 @@ class ApiService {
         return this.request<{ success: boolean; channels: any[] }>('/api/channels');
     }
 
+    async syncChannels() {
+        return this.request<{ success: boolean; synced: number; channels: any[] }>('/api/sync-channels', {
+            method: 'POST',
+        });
+    }
+
     // File view/download URLs
     getFileViewUrl(messageId: string): string {
         return `${this.baseUrl}/api/view/${messageId}`;
@@ -242,6 +248,13 @@ class ApiService {
             },
         });
 
+        return response.data;
+    }
+
+    async viewFileAsBlob(messageId: string): Promise<Blob> {
+        const response = await this.axiosInstance.get(`/api/view/${messageId}`, {
+            responseType: 'blob',
+        });
         return response.data;
     }
 

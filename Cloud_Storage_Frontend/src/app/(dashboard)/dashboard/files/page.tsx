@@ -103,8 +103,18 @@ export default function FilesPage() {
         try {
             const data = await apiService.getChannels()
             if (data.success) {
-                setChannels(data.channels || [])
-                if (data.channels?.length > 0) setSelectedChannel(data.channels[0].channel_id)
+                if (data.channels?.length === 0) {
+                    // No channels in DB — sync from Telegram first
+                    await apiService.syncChannels()
+                    const synced = await apiService.getChannels()
+                    if (synced.success) {
+                        setChannels(synced.channels || [])
+                        if (synced.channels?.length > 0) setSelectedChannel(synced.channels[0].channel_id)
+                    }
+                } else {
+                    setChannels(data.channels || [])
+                    if (data.channels?.length > 0) setSelectedChannel(data.channels[0].channel_id)
+                }
             }
         } catch (err) { console.error('Failed to fetch channels:', err) }
     }, [])
@@ -234,7 +244,7 @@ export default function FilesPage() {
 
     const handleView = useCallback(async (messageId: string) => {
         try {
-            const blob = await apiService.downloadFileAsBlob(messageId)
+            const blob = await apiService.viewFileAsBlob(messageId)
             const url = window.URL.createObjectURL(blob)
             window.open(url, '_blank')
             setTimeout(() => window.URL.revokeObjectURL(url), 5000)
