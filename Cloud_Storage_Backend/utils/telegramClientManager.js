@@ -1,15 +1,10 @@
-// utils/telegramClientManager.js — mtcute version
-// Drop-in replacement for gramjs telegramClientManager.
-// mtcute supports true streaming — RAM per upload ≈ 512KB (one part), not full file size.
-
 const { TelegramClient } = require('@mtcute/node');
-
+const { MemoryStorage } = require('@mtcute/core');
 const MAX_CACHED_CLIENTS = 4;
 const CLIENT_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 min
 
 class TelegramClientManager {
     constructor() {
-        // Map<userId, { client, lastUsed, timer }>
         this.clients = new Map();
     }
 
@@ -32,10 +27,9 @@ class TelegramClientManager {
 
         // Create mtcute client using saved session string
         const client = new TelegramClient({
-            apiId:   parseInt(user.telegram_api_id),
+            apiId: parseInt(user.telegram_api_id),
             apiHash: user.telegram_api_hash,
-            // 'mem' uses in-memory storage — session is loaded from DB string below
-            storage: 'mem',
+            storage: new MemoryStorage(),
         });
 
         // Import the saved gramjs-compatible session
@@ -48,7 +42,7 @@ class TelegramClientManager {
         const entry = {
             client,
             lastUsed: Date.now(),
-            timer:    this._idleTimer(userId, client),
+            timer: this._idleTimer(userId, client),
         };
 
         this.clients.set(userId, entry);
@@ -60,26 +54,26 @@ class TelegramClientManager {
             try {
                 await client.disconnect();
                 console.log(`💤 mtcute client idle-disconnected for user ${userId}`);
-            } catch (_) {}
+            } catch (_) { }
             this.clients.delete(userId);
         }, CLIENT_IDLE_TIMEOUT);
     }
 
     async _evictOldest() {
-        let oldestId   = null;
+        let oldestId = null;
         let oldestTime = Infinity;
 
         for (const [userId, entry] of this.clients) {
             if (entry.lastUsed < oldestTime) {
                 oldestTime = entry.lastUsed;
-                oldestId   = userId;
+                oldestId = userId;
             }
         }
 
         if (oldestId) {
             const entry = this.clients.get(oldestId);
             clearTimeout(entry.timer);
-            try { await entry.client.disconnect(); } catch (_) {}
+            try { await entry.client.disconnect(); } catch (_) { }
             this.clients.delete(oldestId);
             console.log(`🗑️ Evicted mtcute client for user ${oldestId}`);
         }
@@ -88,7 +82,7 @@ class TelegramClientManager {
     async disconnectAll() {
         for (const [, entry] of this.clients) {
             clearTimeout(entry.timer);
-            try { await entry.client.disconnect(); } catch (_) {}
+            try { await entry.client.disconnect(); } catch (_) { }
         }
         this.clients.clear();
     }

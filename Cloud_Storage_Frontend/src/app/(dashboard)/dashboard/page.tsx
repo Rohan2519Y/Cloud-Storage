@@ -186,7 +186,7 @@ export default function Dashboard() {
             <h2 className="text-lg font-semibold text-black dark:text-white">Recent Files</h2>
             <button
               onClick={() => router.push('/dashboard/files')}
-              className="inline-flex items-center gap-1 text-sm font-medium text-zinc-500 hover:text-black dark:hover:text-white transition-colors"
+              className="cursor-pointer inline-flex items-center gap-1 text-sm font-medium text-zinc-500 hover:text-black dark:hover:text-white transition-colors"
             >
               View all <ArrowUpRight size={14} />
             </button>
@@ -260,12 +260,6 @@ export default function Dashboard() {
         <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-black dark:text-white">Your Channels</h2>
-            <button
-              onClick={() => router.push('/dashboard/channels')}
-              className="inline-flex items-center gap-1 text-sm font-medium text-zinc-500 hover:text-black dark:hover:text-white transition-colors"
-            >
-              View all <ArrowUpRight size={14} />
-            </button>
           </div>
 
           {loading ? (
@@ -309,7 +303,7 @@ export default function Dashboard() {
       <div className="mt-8 grid gap-4 sm:grid-cols-3">
         <button
           onClick={() => router.push('/dashboard/files')}
-          className="flex items-center gap-3 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:border-zinc-400 dark:hover:border-zinc-600 transition-all group"
+          className="cursor-pointer flex items-center gap-3 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:border-zinc-400 dark:hover:border-zinc-600 transition-all group"
         >
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-black dark:bg-white">
             <Upload size={18} className="text-white dark:text-black" />
@@ -322,7 +316,7 @@ export default function Dashboard() {
 
         <button
           onClick={() => router.push('/dashboard/files')}
-          className="flex items-center gap-3 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:border-zinc-400 dark:hover:border-zinc-600 transition-all group"
+          className="cursor-pointer flex items-center gap-3 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:border-zinc-400 dark:hover:border-zinc-600 transition-all group"
         >
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-black dark:bg-white">
             <Files size={18} className="text-white dark:text-black" />
@@ -335,7 +329,7 @@ export default function Dashboard() {
 
         <button
           onClick={() => router.push('/dashboard/settings')}
-          className="flex items-center gap-3 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:border-zinc-400 dark:hover:border-zinc-600 transition-all group"
+          className="cursor-pointer flex items-center gap-3 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:border-zinc-400 dark:hover:border-zinc-600 transition-all group"
         >
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-black dark:bg-white">
             <Clock size={18} className="text-white dark:text-black" />

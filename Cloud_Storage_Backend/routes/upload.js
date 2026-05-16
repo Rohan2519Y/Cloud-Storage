@@ -335,7 +335,6 @@ router.get('/files/:id', authenticateUser, async (req, res) => {
 
 router.get('/download/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async (req, res) => {
     try {
-        console.log('messageId param:', req.params.messageId);
         const [fileRecords] = await pool.execute(
             'SELECT * FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
             [req.params.messageId, req.user.id]
@@ -343,21 +342,30 @@ router.get('/download/:messageId', authenticateUser, rateLimit(20, 60 * 1000), a
         if (fileRecords.length === 0) return res.status(404).json({ error: 'File not found' });
 
         const fileRecord = fileRecords[0];
-        console.log('fileRecord:', fileRecord);
         const client = await tgManager.getClient(req.user);
 
-        // mtcute: get message then download its media
-        const messages = await client.getMessages(fileRecord.channel_id, {
-            ids: [parseInt(req.params.messageId)]
-        });
-
-        if (!messages?.length || !messages[0].media) {
-            return res.status(404).json({ error: 'File not found on Telegram' });
+        // Resolve peer first to add it to cache
+        let chat;
+        try {
+            chat = await client.getChat(fileRecord.channel_id);
+        } catch {
+            try {
+                chat = await client.getChat(parseInt(fileRecord.channel_id));
+            } catch (e) {
+                return res.status(404).json({ error: 'Channel not found' });
+            }
         }
 
-        // mtcute downloadAsBuffer — returns Uint8Array
-        const fileBuffer = await client.downloadAsBuffer(messages[0].media);
+        const messages = await client.getMessages(
+            chat,
+            parseInt(req.params.messageId)
+        );
 
+        const message = Array.isArray(messages) ? messages[0] : messages;
+        if (!message || !message.media)
+            return res.status(404).json({ error: 'File not found on Telegram' });
+
+        const fileBuffer = await client.downloadAsBuffer(message.media);
         res.setHeader('Content-Type', fileRecord.mime_type || 'application/octet-stream');
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.original_name)}"`);
         res.setHeader('Content-Length', fileBuffer.length);

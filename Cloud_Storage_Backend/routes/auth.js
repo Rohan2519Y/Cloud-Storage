@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { TelegramClient } = require('@mtcute/node');
+const { MemoryStorage } = require('@mtcute/core');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
@@ -90,7 +91,7 @@ router.post('/send-code', rateLimit(5, 60 * 1000), async (req, res) => {
         const client = new TelegramClient({
             apiId: Number(apiId),
             apiHash: apiHash,
-            storage: 'mem',
+            storage: new MemoryStorage(),
         });
 
         await client.connect();
@@ -248,7 +249,7 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
         const userClient = new TelegramClient({
             apiId: Number(tempData.apiId),
             apiHash: tempData.apiHash,
-            storage: 'mem',
+            storage: new MemoryStorage(),
         });
         await userClient.importSession(sessionString);
         await userClient.connect();
