@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
 const pool = require('../utils/database');
+const { sendMail, generateResetToken, verifyResetToken } = require('../utils/mailer');
 
 // ─── JWT helpers ────────────────────────────────────────────────────────────
 
@@ -388,6 +389,65 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
                 defaultChannelUsername: user.default_channel_username,
             },
         });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── FORGOT PASSWORD — send reset email ─────────────────────────────────
+router.post('/forgot-password', rateLimit(3, 60 * 1000), async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Email required' });
+
+        const [users] = await pool.execute(
+            'SELECT id, email FROM users WHERE email = ? AND is_profile_complete = TRUE',
+            [email]
+        );
+
+        // Always return success to prevent email enumeration
+        if (users.length === 0) {
+            return res.json({ success: true, message: 'If the email exists, a reset link has been sent.' });
+        }
+
+        const user = users[0];
+        const token = generateResetToken(user.id, user.email);
+        const resetUrl = `${process.env.ALLOWED_ORIGINS || 'http://localhost:4000'}/password?token=${token}`;
+
+        await sendMail({
+            to: user.email,
+            subject: 'Reset Your Password - CloudStorage',
+            html: `
+                <h2>Reset Your Password</h2>
+                <p>Click the link below to reset your password. This link expires in 30 minutes.</p>
+                <a href="${resetUrl}" style="display:inline-block;padding:12px 24px;background:#000;color:#fff;border-radius:8px;text-decoration:none;font-weight:bold;">Reset Password</a>
+                <p style="margin-top:16px;color:#666;">If you didn't request this, you can safely ignore this email.</p>
+            `
+        });
+
+        res.json({ success: true, message: 'If the email exists, a reset link has been sent.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── RESET PASSWORD — verify token and update password ──────────────────
+router.post('/reset-password', rateLimit(5, 60 * 1000), async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) return res.status(400).json({ error: 'Token and new password required' });
+        if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+        const decoded = verifyResetToken(token);
+        if (!decoded) return res.status(400).json({ error: 'Invalid or expired token' });
+
+        const password_hash = await bcrypt.hash(newPassword, 10);
+        await pool.execute(
+            'UPDATE users SET password_hash = ? WHERE id = ?',
+            [password_hash, decoded.userId]
+        );
+
+        res.json({ success: true, message: 'Password reset successfully' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

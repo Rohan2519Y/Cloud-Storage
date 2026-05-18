@@ -176,7 +176,7 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
                     {/* Theme toggle */}
                     <button
                         onClick={toggleTheme}
-                        className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-500 hover:bg-zinc-100 hover:text-black dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-white transition-all duration-200"
+                        className="cursor-pointer flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-500 hover:bg-zinc-100 hover:text-black dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-white transition-all duration-200"
                     >
                         {theme === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
                         {!collapsed && <span>{theme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>}
@@ -185,7 +185,7 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
                     {/* Logout */}
                     <button
                         onClick={handleLogout}
-                        className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-500 hover:bg-red-50 hover:text-red-600 dark:text-zinc-400 dark:hover:bg-red-950 dark:hover:text-red-400 transition-all duration-200"
+                        className="cursor-pointer flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-500 hover:bg-red-50 hover:text-red-600 dark:text-zinc-400 dark:hover:bg-red-950 dark:hover:text-red-400 transition-all duration-200"
                     >
                         <LogOut size={20} />
                         {!collapsed && <span>Logout</span>}
