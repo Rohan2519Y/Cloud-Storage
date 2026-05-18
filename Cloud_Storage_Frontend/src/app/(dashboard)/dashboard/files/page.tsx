@@ -112,14 +112,16 @@ export default function FilesPage() {
                     try {
                         await apiService.syncChannels()
                         const synced = await apiService.getChannels()
-                        if (synced.success) {
-                            setChannels(synced.channels || [])
-                            if (synced.channels?.length > 0) setSelectedChannel(synced.channels[0].channel_id)
+                        if (synced.success && synced.channels?.length > 0) {
+                            setChannels(synced.channels)
+                            setSelectedChannel(synced.channels[0].channel_id)
+                            return
                         }
                     } catch (syncErr) {
                         console.error('Channel sync failed:', syncErr)
-                        // Don't crash — user can manually sync later
                     }
+                    // Retry after 3 seconds if still empty
+                    setTimeout(() => fetchChannels(), 3000)
                 } else {
                     setChannels(data.channels || [])
                     if (data.channels?.length > 0) setSelectedChannel(data.channels[0].channel_id)
@@ -148,7 +150,10 @@ export default function FilesPage() {
     }, [])
 
     // ---------- effects ----------
-    useEffect(() => { apiService.initToken(); fetchChannels() }, [fetchChannels])
+    useEffect(() => {
+        apiService.initToken();
+        setTimeout(() => fetchChannels(), 100);
+    }, [fetchChannels])
 
     useEffect(() => {
         setLoading(true)
@@ -366,9 +371,10 @@ export default function FilesPage() {
                             Delete {deleteConfirm.type === 'file' ? 'File' : 'Folder'}
                         </h3>
                         <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
-                            Are you sure you want to delete <span className="font-medium text-black dark:text-white">"{deleteConfirm.name}"</span>?
+                            Are you sure you want to delete{' '}
+                            <span className="font-medium text-black dark:text-white break-all">"{deleteConfirm.name}"</span>?
                             {deleteConfirm.type === 'folder' && ' This will delete all files inside it.'}
-                            This action cannot be undone.
+                            {' '}This action cannot be undone.
                         </p>
                         <div className="flex gap-2 justify-end">
                             <button onClick={() => setDeleteConfirm(null)} className="cursor-pointer rounded-xl px-4 py-2 text-sm font-medium text-zinc-500 hover:text-black dark:hover:text-white border border-zinc-200 dark:border-zinc-800">

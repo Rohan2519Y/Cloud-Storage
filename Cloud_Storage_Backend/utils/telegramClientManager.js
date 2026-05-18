@@ -1,7 +1,7 @@
 const { TelegramClient } = require('@mtcute/node');
 const { MemoryStorage } = require('@mtcute/core');
 const MAX_CACHED_CLIENTS = 4;
-const CLIENT_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 min
+const CLIENT_IDLE_TIMEOUT = 5 * 60 * 1000;
 
 class TelegramClientManager {
     constructor() {
@@ -85,6 +85,20 @@ class TelegramClientManager {
             try { await entry.client.disconnect(); } catch (_) { }
         }
         this.clients.clear();
+    }
+
+    pauseTimer(userId) {
+        const entry = this.clients.get(userId);
+        if (!entry) return;
+        clearTimeout(entry.timer); // stop the 5min countdown
+    }
+
+    resumeTimer(userId) {
+        const entry = this.clients.get(userId);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        entry.timer = this._idleTimer(userId, entry.client); // restart 5min
+        entry.lastUsed = Date.now();
     }
 }
 

@@ -81,21 +81,21 @@ router.get('/upload-progress/:uploadId', async (req, res) => {
     res.flushHeaders();
 
     const id = req.params.uploadId;
+
+    // Pre-seed map so it's never undefined when interval fires
+    uploadProgressMap.set(id, 0);
     res.write(`data: ${JSON.stringify({ progress: 0 })}\n\n`);
 
     const interval = setInterval(() => {
-        const progress = uploadProgressMap.get(id);
-        if (progress !== undefined) {
-            res.write(`data: ${JSON.stringify({ progress })}\n\n`);
-            if (progress >= 100) {
-                clearInterval(interval);
-                uploadProgressMap.delete(id);
-                res.end();
-            }
-        } else {
-            res.write(`: heartbeat\n\n`);
+        const progress = uploadProgressMap.get(id) ?? 0;
+        // Always send — no more silent heartbeats swallowing real progress
+        res.write(`data: ${JSON.stringify({ progress })}\n\n`);
+        if (progress >= 100) {
+            clearInterval(interval);
+            uploadProgressMap.delete(id);
+            res.end();
         }
-    }, 300);
+    }, 150); // tighter than 300ms for smoother UI
 
     req.on('close', () => {
         clearInterval(interval);
@@ -116,8 +116,6 @@ router.post('/upload-cancel/:uploadId', async (req, res) => {
 });
 
 // ─── UPLOAD ──────────────────────────────────────────────────────────────────
-// mtcute uploadFile accepts a Node.js Readable stream + fileSize.
-// It reads the stream in 512KB MTProto parts — never loads the whole file into RAM.
 
 router.post('/upload',
     authenticateUser,
@@ -131,9 +129,9 @@ router.post('/upload',
         }
 
         activeUploads++;
+        const user = req.user;
 
         try {
-            const user = req.user;
             const channelId = req.query.channelId || user.default_group_id;
             const uploadId = req.query.uploadId || null;
             const folderId = req.query.folderId || null;
@@ -143,17 +141,18 @@ router.post('/upload',
                 return res.status(400).json({ error: 'No channel specified' });
             }
 
+            // FIX: Signal immediately that request reached the server
+            if (uploadId) uploadProgressMap.set(uploadId, 1);
+
             const bb = busboy({
                 headers: req.headers,
-                limits: { fileSize: 2 * 1024 * 1024 * 1024 } // 2GB
+                limits: { fileSize: 2 * 1024 * 1024 * 1024 }
             });
 
             let fileName = '';
             let mimeType = 'application/octet-stream';
             let fileSize = 0;
 
-            // Content-Length header gives us total multipart size
-            // Subtract ~200 bytes for multipart boundaries to estimate file size
             const contentLength = parseInt(req.headers['content-length'] || '0');
             const estimatedFileSize = contentLength > 200 ? contentLength - 200 : 0;
 
@@ -163,24 +162,17 @@ router.post('/upload',
                     fileName = info.filename || 'unnamed_file';
                     mimeType = info.mimeType || 'application/octet-stream';
 
-                    console.log(`📤 mtcute stream upload: ${fileName} (uploadId: ${uploadId})`);
+                    console.log(`📤 Upload started: ${fileName} (uploadId: ${uploadId})`);
 
                     try {
-                        if (uploadId) uploadProgressMap.set(uploadId, 5);
+                        // FIX: 3% as soon as busboy fires the file event
+                        if (uploadId) uploadProgressMap.set(uploadId, 3);
 
                         const client = await tgManager.getClient(user);
+                        tgManager.pauseTimer(user.id);
 
-                        // mtcute uses chat ID directly (number or username string)
                         const chatId = parseInt(channelId);
-
-                        // ── TRUE STREAMING ──────────────────────────────────
-                        // Convert busboy fileStream to a Node.js Readable
-                        // mtcute uploadFile reads it in 512KB chunks
-                        // RAM usage = 512KB at a time, NOT the full file
-
                         let received = 0;
-
-                        // Wrap fileStream so we can track bytes received
                         const trackingStream = new Readable({ read() { } });
 
                         fileStream.on('data', (chunk) => {
@@ -192,37 +184,38 @@ router.post('/upload',
                             received += chunk.length;
                             trackingStream.push(chunk);
 
-                            // Receive progress 0–40%
+                            // FIX: Receive phase = 3–30% (was 5–40%)
+                            // Gives more headroom for the Telegram phase to feel smooth
                             if (estimatedFileSize > 0) {
-                                const p = Math.min(Math.round((received / estimatedFileSize) * 40), 40);
+                                const p = Math.min(3 + Math.round((received / estimatedFileSize) * 27), 30);
                                 if (uploadId) uploadProgressMap.set(uploadId, p);
                             }
                         });
 
                         fileStream.on('end', () => {
-                            trackingStream.push(null); // signal end of stream
+                            trackingStream.push(null);
                             fileSize = received;
+                            // FIX: Explicitly land at 30% when receive is done
+                            // so the UI doesn't stall while Telegram upload begins
+                            if (uploadId) uploadProgressMap.set(uploadId, 30);
                         });
 
                         fileStream.on('error', (err) => trackingStream.destroy(err));
                         fileStream.on('limit', () => reject(new Error('File exceeds 2GB limit')));
 
-                        if (uploadId) uploadProgressMap.set(uploadId, 40);
-
-                        // mtcute uploadFile — streams in 512KB parts to Telegram
                         const uploadedFile = await client.uploadFile({
-                            file: trackingStream,      // Node.js Readable stream
-                            fileName: fileName,
-                            fileSize: estimatedFileSize || undefined, // helps mtcute pick optimal part size
+                            file: trackingStream,
+                            fileName,
+                            fileSize: estimatedFileSize || undefined,
                             fileMime: mimeType,
                             progressCallback: (uploaded, total) => {
                                 if (uploadCancelMap.get(uploadId)) {
                                     throw new Error('UPLOAD_CANCELLED');
                                 }
-                                // Telegram upload progress 40–99%
+                                // FIX: Telegram phase = 30–99%
                                 const p = total > 0
-                                    ? Math.round(40 + (uploaded / total) * 59)
-                                    : Math.min(Math.round(40 + (uploaded / (estimatedFileSize || uploaded)) * 59), 99);
+                                    ? Math.round(30 + (uploaded / total) * 69)
+                                    : Math.min(Math.round(30 + (uploaded / (estimatedFileSize || uploaded)) * 69), 99);
                                 if (uploadId) uploadProgressMap.set(uploadId, Math.min(p, 99));
                                 process.stdout.write(`\r📤 Telegram: ${total > 0 ? Math.round(uploaded / total * 100) : '?'}%`);
                             },
@@ -230,10 +223,9 @@ router.post('/upload',
 
                         console.log(`\n📦 Sending message to channel...`);
 
-                        // mtcute sendMedia with InputMedia.document for force-document behavior
                         const result = await client.sendMedia(chatId, InputMedia.document(uploadedFile, {
                             caption: `Uploaded by ${user.first_name || ''} ${user.last_name || ''}`.trim(),
-                            fileName: fileName,
+                            fileName,
                         }));
 
                         console.log(`✅ Done — message ID ${result.id}`);
@@ -263,13 +255,7 @@ router.post('/upload',
 
             res.json({
                 success: true,
-                file: {
-                    id: fileId,
-                    name: fileName,
-                    size: fileSize,
-                    messageId: result.id,
-                    channelId,
-                }
+                file: { id: fileId, name: fileName, size: fileSize, messageId: result.id, channelId }
             });
 
         } catch (err) {
@@ -290,6 +276,7 @@ router.post('/upload',
 
         } finally {
             activeUploads--;
+            tgManager.resumeTimer(user.id);
         }
     }
 );

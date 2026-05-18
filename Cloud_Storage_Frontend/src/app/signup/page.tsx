@@ -121,7 +121,7 @@ export default function SignupPage() {
   const handleVerifyCode = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setError(''); 
+    setError('');
     console.log('2FA password received:', JSON.stringify(twoFAPassword));
     console.log('2FA password type:', typeof twoFAPassword);
     console.log('2FA password length:', twoFAPassword?.length);
@@ -174,7 +174,7 @@ export default function SignupPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black py-12">
-      <div className="max-w-md w-full mx-4">
+      <div className="w-full md:mx-16 mx-4">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-black dark:text-white mb-2">Create Account</h1>
           <p className="text-gray-600 dark:text-gray-400">
@@ -187,143 +187,151 @@ export default function SignupPage() {
         {/* STEP 1 */}
         {step === 1 && (
           <form onSubmit={handleSendCode} className="space-y-6">
-            {stepOneImages}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              <div>{stepOneImages}</div>
+              <div className="space-y-6">
 
-            <div>
-              <label className="block text-sm font-medium text-black dark:text-white mb-2">
-                Telegram Phone Number
-              </label>
-              <input
-                type="tel"
-                value={phoneNumber}
-                onChange={(e) => setPhoneNumber(e.target.value)}
-                autoComplete="tel"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                placeholder="+1234567890"
-                required
-              />
-              <p className="mt-1 text-xs text-gray-500">Include country code (e.g., +91 for India)</p>
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                    Telegram Phone Number
+                  </label>
+                  <input
+                    type="tel"
+                    value={phoneNumber}
+                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    autoComplete="tel"
+                    className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
+                    placeholder="+1234567890"
+                    required
+                  />
+                  <p className="mt-1 text-xs text-gray-500">Include country code (e.g., +91 for India)</p>
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-black dark:text-white mb-2">
-                Telegram API ID
-              </label>
-              <input
-                type="text"
-                value={apiId}
-                onChange={(e) => setApiId(e.target.value)}
-                autoComplete="off"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                placeholder="Get from my.telegram.org/apps"
-                required
-              />
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                    Telegram API ID
+                  </label>
+                  <input
+                    type="text"
+                    value={apiId}
+                    onChange={(e) => setApiId(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
+                    placeholder="Get from my.telegram.org/apps"
+                    required
+                  />
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-black dark:text-white mb-2">
-                Telegram API Hash
-              </label>
-              <input
-                type="text"
-                value={apiHash}
-                onChange={(e) => setApiHash(e.target.value)}
-                autoComplete="off"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                placeholder="32-character hash"
-                required
-              />
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                    Telegram API Hash
+                  </label>
+                  <input
+                    type="text"
+                    value={apiHash}
+                    onChange={(e) => setApiHash(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
+                    placeholder="32-character hash"
+                    required
+                  />
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-black dark:text-white mb-2">
-                Channel Username (Optional)
-              </label>
-              <input
-                type="text"
-                value={channelUsername}
-                onChange={(e) => setChannelUsername(e.target.value)}
-                autoComplete="off"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                placeholder="@yourchannel"
-              />
-              <p className="mt-1 text-xs text-gray-500">Your channel where files will be stored</p>
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                    Channel Username (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={channelUsername}
+                    onChange={(e) => setChannelUsername(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
+                    placeholder="@yourchannel"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">Your channel where files will be stored</p>
+                </div>
 
-            {error && (
-              <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-                <p className="text-red-600 dark:text-red-400 text-sm text-center">{error}</p>
+                {error && (
+                  <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                    <p className="text-red-600 dark:text-red-400 text-sm text-center">{error}</p>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 text-sm"
+                >
+                  {loading ? 'Sending Code...' : 'Send Verification Code'}
+                </button>
               </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 text-sm"
-            >
-              {loading ? 'Sending Code...' : 'Send Verification Code'}
-            </button>
+            </div>
           </form>
         )}
 
         {/* STEP 2 */}
         {step === 2 && (
           <form onSubmit={handleVerifyCode} className="space-y-6">
-            {stepTwoImages}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              <div>{stepTwoImages}</div>
+              <div className="space-y-6">
 
-            <div>
-              <label className="block text-sm font-medium text-black dark:text-white mb-2">
-                Verification Code
-              </label>
-              <input
-                type="text"
-                value={verificationCode}
-                onChange={(e) => setVerificationCode(e.target.value)}
-                autoComplete="one-time-code"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                placeholder="Enter 5-digit code"
-                required
-              />
-              <p className="mt-1 text-xs text-gray-500">Check your Telegram app for the code</p>
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                    Verification Code
+                  </label>
+                  <input
+                    type="text"
+                    value={verificationCode}
+                    onChange={(e) => setVerificationCode(e.target.value)}
+                    autoComplete="one-time-code"
+                    className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
+                    placeholder="Enter 5-digit code"
+                    required
+                  />
+                  <p className="mt-1 text-xs text-gray-500">Check your Telegram app for the code</p>
+                </div>
 
-            {/* ADD THIS NEW FIELD */}
-            <div>
-              <label className="block text-sm font-medium text-black dark:text-white mb-2">
-                2FA Password (if enabled)
-              </label>
-              <input
-                type="password"
-                value={twoFAPassword}
-                onChange={(e) => setTwoFAPassword(e.target.value)}
-                autoComplete="off"
-                className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                placeholder="Leave empty if not set"
-              />
-              <p className="mt-1 text-xs text-gray-500">Only needed if you have 2-step verification enabled</p>
-            </div>
+                {/* ADD THIS NEW FIELD */}
+                <div>
+                  <label className="block text-sm font-medium text-black dark:text-white mb-2">
+                    2FA Password (if enabled)
+                  </label>
+                  <input
+                    type="password"
+                    value={twoFAPassword}
+                    onChange={(e) => setTwoFAPassword(e.target.value)}
+                    autoComplete="off"
+                    className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
+                    placeholder="Leave empty if not set"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">Only needed if you have 2-step verification enabled</p>
+                </div>
 
-            {error && (
-              <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-                <p className="text-red-600 dark:text-red-400 text-sm text-center">{error}</p>
+                {error && (
+                  <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                    <p className="text-red-600 dark:text-red-400 text-sm text-center">{error}</p>
+                  </div>
+                )}
+
+                <div className="flex gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setStep(1)}
+                    className="flex-1 py-3 border border-gray-300 dark:border-gray-700 text-black dark:text-white rounded-lg font-medium hover:bg-gray-50 dark:hover:bg-gray-900 transition text-sm"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 text-sm"
+                  >
+                    {loading ? 'Verifying...' : 'Verify & Continue'}
+                  </button>
+                </div>
               </div>
-            )}
-
-            <div className="flex gap-4">
-              <button
-                type="button"
-                onClick={() => setStep(1)}
-                className="flex-1 py-3 border border-gray-300 dark:border-gray-700 text-black dark:text-white rounded-lg font-medium hover:bg-gray-50 dark:hover:bg-gray-900 transition text-sm"
-              >
-                Back
-              </button>
-              <button
-                type="submit"
-                disabled={loading}
-                className="flex-1 py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 text-sm"
-              >
-                {loading ? 'Verifying...' : 'Verify & Continue'}
-              </button>
             </div>
           </form>
         )}
