@@ -124,7 +124,7 @@ function PasswordContent() {
                         <button
                             type="submit"
                             disabled={loading}
-                            className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-xl font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-200 transition disabled:opacity-50 flex items-center justify-center gap-2"
+                            className="cursor-pointer w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-xl font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-200 transition disabled:opacity-50 flex items-center justify-center gap-2"
                         >
                             {loading ? <Loader2 size={18} className="animate-spin" /> : null}
                             Send Reset Link
@@ -143,7 +143,7 @@ function PasswordContent() {
                         <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
                             Check your inbox and click the reset link. The link expires in 30 minutes.
                         </p>
-                        <button onClick={() => { setStep('email'); setSuccess(''); }} className="text-sm font-medium text-black dark:text-white hover:underline">
+                        <button onClick={() => { setStep('email'); setSuccess(''); }} className="cursor-pointer text-sm font-medium text-black dark:text-white hover:underline">
                             Send another email
                         </button>
                     </div>
