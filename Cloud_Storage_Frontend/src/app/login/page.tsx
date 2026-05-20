@@ -19,29 +19,21 @@ export default function LoginPage() {
     }
   }, [router]);
 
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = useCallback(async () => {
     setLoading(true);
     setError('');
-
-    let abort = false;
     try {
       const response = await apiService.loginWithEmail(emailOrPhone, password);
-
-      if (abort) return;
       if (response.success) {
         apiService.setToken(response.token);
         sessionStorage.setItem('telegram_user_account', JSON.stringify(response.user));
         router.push('/dashboard');
       }
     } catch (err: any) {
-      if (abort) return;
       setError(err.response?.data?.error || err.message || 'Login failed');
     } finally {
-      if (!abort) setLoading(false);
+      setLoading(false);
     }
-
-    return () => { abort = true; };
   }, [emailOrPhone, password, router]);
 
   return (
@@ -56,7 +48,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <form className="space-y-6">
           <div>
             <label className="block text-sm font-medium text-black dark:text-white mb-2">
               Email or Phone Number
@@ -94,9 +86,10 @@ export default function LoginPage() {
           )}
 
           <button
-            type="submit"
+            type="button"
+            onClick={handleSubmit}
             disabled={loading}
-            className="w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            className="cursor-pointer w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
