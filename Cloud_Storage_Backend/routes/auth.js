@@ -395,7 +395,7 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
 });
 
 // ─── FORGOT PASSWORD — send reset email ─────────────────────────────────
-router.post('/forgot-password', rateLimit(3, 60 * 1000), async (req, res) => {
+router.post('/forgot-password', rateLimit(10, 60 * 1000), async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ error: 'Email required' });

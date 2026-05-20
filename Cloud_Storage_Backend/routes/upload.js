@@ -42,14 +42,11 @@ function rateLimit(maxRequests, windowMs) {
         next();
     };
 }
+
 setInterval(() => {
     const now = Date.now();
     for (const [k, v] of rateLimitMap) if (now > v.resetAt) rateLimitMap.delete(k);
 }, 5 * 60 * 1000);
-
-// ─── Concurrent upload limiter ───────────────────────────────────────────────
-// mtcute streams in 512KB parts — RAM per upload is constant regardless of file size
-// Render free (512MB) → safely handle more concurrent uploads
 
 let activeUploads = 0;
 const MAX_CONCURRENT_UPLOADS = 3;
