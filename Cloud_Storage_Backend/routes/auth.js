@@ -432,7 +432,7 @@ router.post('/forgot-password', rateLimit(10, 60 * 1000), async (req, res) => {
 });
 
 // ─── RESET PASSWORD — verify token and update password ──────────────────
-router.post('/reset-password', rateLimit(5, 60 * 1000), async (req, res) => {
+router.post('/reset-password', rateLimit(10, 60 * 1000), async (req, res) => {
     try {
         const { token, newPassword } = req.body;
         if (!token || !newPassword) return res.status(400).json({ error: 'Token and new password required' });
