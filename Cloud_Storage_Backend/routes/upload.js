@@ -463,22 +463,26 @@ router.post('/sync-channels', authenticateUser, async (req, res) => {
         const client = await tgManager.getClient(user);
 
         const channels = [];
+        let count = 0;
+
         for await (const dialog of client.iterDialogs({ limit: 500 })) {
-            // mtcute Dialog has .peer not .chat
+            count++;
+            if (count % 100 === 0) await new Promise(r => setTimeout(r, 1000));
+
             const peer = dialog.peer;
             if (!peer) continue;
+            if (peer.type === 'user') continue;
 
-            // peer.type for channels/groups
-            const type = peer.type;
-            const isChannel = type === 'chat' && peer.title !== undefined;
-            if (!isChannel) continue;
+            const title = peer.title || '';
+            if (!title) continue;
 
             const id = peer.id?.toString();
-            const title = peer.title || peer.firstName || '';
-            const username = peer.username || null;
-
             if (!id) continue;
 
+            // Right here in peer — no extra API call needed
+            if (!peer.isCreator && !peer.isAdmin) continue;
+
+            const username = peer.username || null;
             channels.push({ id, title, username });
 
             const [existing] = await pool.execute(
@@ -493,7 +497,7 @@ router.post('/sync-channels', authenticateUser, async (req, res) => {
                 );
             }
         }
-        console.log('asdfghhjjjkk', channels)
+
         res.json({ success: true, synced: channels.length, channels });
     } catch (err) {
         res.status(500).json({ error: err.message });
