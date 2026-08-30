@@ -148,7 +148,7 @@ export default function LandingPage() {
             </p>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-8">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
             {features.map((feature, i) => (
               <div
                 key={i}
@@ -171,7 +171,7 @@ export default function LandingPage() {
             <p className="text-xl text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">Get started in minutes with these simple steps</p>
           </div>
 
-          <div className="grid md:grid-cols-4 gap-8">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
             {howItWorks.map((item, i) => (
               <div key={i} className="text-center group">
                 <div className="w-16 h-16 mx-auto dark:text-white rounded-full border-2 border-black dark:border-white flex items-center justify-center text-2xl font-bold mb-4 group-hover:scale-110 transition">

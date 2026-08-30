@@ -83,6 +83,7 @@ export default function Dashboard() {
   const [recentFiles, setRecentFiles] = useState<FileItem[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
+  const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
 
   const fetchDashboardData = useCallback(async () => {
     try {
@@ -157,7 +158,7 @@ export default function Dashboard() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
         {statCards.map((card, index) => (
           <div
             key={index}
@@ -179,7 +180,7 @@ export default function Dashboard() {
         ))}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Recent Files */}
         <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-6">
           <div className="flex items-center justify-between mb-4">
@@ -232,21 +233,34 @@ export default function Dashboard() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          apiService.downloadFileAsBlob(file.telegram_message_id).then(blob => {
-                            const url = URL.createObjectURL(blob);
+                          const id = file.telegram_message_id;
+                          setDownloadingIds((prev) => new Set(prev).add(id));
+                          apiService.getDownloadTicket(id).then(ticket => {
+                            const url = `${apiService.getFileDownloadUrl(id)}?dt=${encodeURIComponent(ticket)}`;
                             const a = document.createElement('a');
                             a.href = url;
                             a.download = file.original_name;
                             document.body.appendChild(a);
                             a.click();
                             a.remove();
-                            // delayed revoke to ensure download initiates
-                            setTimeout(() => URL.revokeObjectURL(url), 1000);
+                          }).finally(() => {
+                            setTimeout(() => {
+                              setDownloadingIds((prev) => {
+                                const next = new Set(prev);
+                                next.delete(id);
+                                return next;
+                              });
+                            }, 1200);
                           });
                         }}
-                        className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 hover:text-black dark:hover:text-white"
+                        disabled={downloadingIds.has(file.telegram_message_id)}
+                        className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 hover:text-black dark:hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        <Download size={14} />
+                        {downloadingIds.has(file.telegram_message_id) ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Download size={14} />
+                        )}
                       </button>
                     </div>
                   </div>
@@ -300,7 +314,7 @@ export default function Dashboard() {
       </div>
 
       {/* Quick Actions */}
-      <div className="mt-8 grid gap-4 sm:grid-cols-3">
+      <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <button
           onClick={() => router.push('/dashboard/files')}
           className="cursor-pointer flex items-center gap-3 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 hover:border-zinc-400 dark:hover:border-zinc-600 transition-all group"

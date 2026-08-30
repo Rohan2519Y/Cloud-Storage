@@ -207,6 +207,20 @@ class ApiService {
         });
     }
 
+    async moveFile(id: string, folderId: string | null) {
+        return this.request<{ success: boolean }>(`/api/files/${id}/move`, {
+            method: 'PUT',
+            body: { folderId },
+        });
+    }
+
+    async copyFile(id: string, folderId: string | null) {
+        return this.request<{ success: boolean; file: any }>(`/api/files/${id}/copy`, {
+            method: 'POST',
+            body: { folderId },
+        });
+    }
+
     async searchFiles(query: string) {
         return this.request<{ success: boolean; query: string; count: number; files: any[] }>(`/api/search?q=${encodeURIComponent(query)}`);
     }
@@ -234,21 +248,11 @@ class ApiService {
         return `${this.baseUrl}/api/download/${messageId}`;
     }
 
-    // Download file as blob
-    async downloadFileAsBlob(messageId: string, onProgress?: (percent: number) => void): Promise<Blob> {
-        const url = this.getFileDownloadUrl(messageId);
-
-        const response = await this.axiosInstance.get(url, {
-            responseType: 'blob',
-            onDownloadProgress: (progressEvent) => {
-                if (onProgress && progressEvent.total) {
-                    const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                    onProgress(percent);
-                }
-            },
-        });
-
-        return response.data;
+    // Short-lived token so the browser can download natively (no Authorization header needed),
+    // streaming straight to disk instead of buffering the whole file in memory.
+    async getDownloadTicket(messageId: string): Promise<string> {
+        const { token } = await this.request<{ token: string }>(`/api/download-ticket/${messageId}`);
+        return token;
     }
 
     async viewFileAsBlob(messageId: string): Promise<Blob> {

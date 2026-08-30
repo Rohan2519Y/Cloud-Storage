@@ -27,6 +27,36 @@ async function authenticateUser(req, res, next) {
     }
 }
 
+// Native <a href> downloads can't send an Authorization header, so a short-lived
+// single-file ticket (?dt=) is accepted as an alternate credential on download routes.
+async function authenticateDownload(req, res, next) {
+    const ticket = req.query.dt;
+    if (!ticket) return authenticateUser(req, res, next);
+
+    try {
+        const decoded = jwt.verify(ticket, process.env.JWT_SECRET);
+        if (decoded.purpose !== 'download' || decoded.messageId !== req.params.messageId) {
+            return res.status(401).json({ error: 'Invalid or expired download link' });
+        }
+        const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.userId]);
+        if (users.length === 0) return res.status(401).json({ error: 'User not found' });
+        req.user = users[0];
+        next();
+    } catch (err) {
+        res.status(401).json({ error: 'Invalid or expired download link' });
+    }
+}
+
+// A wedged MTProto connection can leave a call pending forever with no error — timing
+// it out turns that into a normal failure so the per-user download queue keeps moving.
+function withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // ─── Rate limiter ─────────────────────────────────────────────────────────────
 
 const rateLimitMap = new Map();
@@ -127,6 +157,11 @@ router.post('/upload',
 
         activeUploads++;
         const user = req.user;
+        // Acquired once the upload actually starts touching Telegram (inside the
+        // busboy 'file' handler below) and released in the outer finally, so an
+        // in-progress upload can't interleave its requests with a concurrent
+        // download/view on the same shared connection.
+        let releaseDownloadSlot = null;
 
         try {
             const channelId = req.query.channelId || user.default_group_id;
@@ -167,10 +202,18 @@ router.post('/upload',
 
                         const client = await tgManager.getClient(user);
                         tgManager.pauseTimer(user.id);
+                        releaseDownloadSlot = await tgManager.acquireDownloadSlot(user.id);
 
                         const chatId = parseInt(channelId);
                         let received = 0;
-                        const trackingStream = new Readable({ read() { } });
+                        // read() fires when the consumer (mtcute's uploadFile, reading this
+                        // stream to send parts to Telegram) wants more data — use that as the
+                        // signal to resume the incoming HTTP stream if it was paused below.
+                        const trackingStream = new Readable({
+                            read() {
+                                if (fileStream.isPaused()) fileStream.resume();
+                            }
+                        });
 
                         fileStream.on('data', (chunk) => {
                             if (uploadCancelMap.get(uploadId)) {
@@ -179,7 +222,14 @@ router.post('/upload',
                                 return;
                             }
                             received += chunk.length;
-                            trackingStream.push(chunk);
+                            // Without checking push()'s return value, a fast upload arriving
+                            // faster than Telegram can accept it would buffer the whole file
+                            // in memory — a real OOM risk for large files on a ~512MB free tier.
+                            // false means the internal buffer is full: pause until read() says
+                            // the consumer is ready for more.
+                            if (!trackingStream.push(chunk)) {
+                                fileStream.pause();
+                            }
 
                             // FIX: Receive phase = 3–30% (was 5–40%)
                             // Gives more headroom for the Telegram phase to feel smooth
@@ -274,6 +324,7 @@ router.post('/upload',
         } finally {
             activeUploads--;
             tgManager.resumeTimer(user.id);
+            releaseDownloadSlot?.();
         }
     }
 );
@@ -313,20 +364,65 @@ router.get('/files/:id', authenticateUser, async (req, res) => {
     }
 });
 
-// ─── DOWNLOAD ────────────────────────────────────────────────────────────────
-// mtcute downloadAsBuffer — downloads file from Telegram into memory buffer
-// For large files consider streaming with downloadAsNodeStream instead
+// ─── DOWNLOAD TICKET ─────────────────────────────────────────────────────────
+// Mints a short-lived, single-file token so the browser can download natively
+// (streamed straight to disk, native progress UI) without an Authorization header.
 
-router.get('/download/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async (req, res) => {
+router.get('/download-ticket/:messageId', authenticateUser, async (req, res) => {
     try {
         const [fileRecords] = await pool.execute(
-            'SELECT * FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
+            'SELECT id FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
             [req.params.messageId, req.user.id]
         );
         if (fileRecords.length === 0) return res.status(404).json({ error: 'File not found' });
 
+        const token = jwt.sign(
+            { userId: req.user.id, messageId: req.params.messageId, purpose: 'download' },
+            process.env.JWT_SECRET,
+            { expiresIn: '2m' }
+        );
+        res.json({ token });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── DOWNLOAD ────────────────────────────────────────────────────────────────
+
+router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000), async (req, res) => {
+    // Set once this request has acquired the client and its download-queue slot,
+    // so the catch block below only tears down what this request actually holds.
+    let tgOperationStarted = false;
+    let releaseDownloadSlot = null;
+    const releaseTgOperation = () => {
+        if (!tgOperationStarted) return;
+        tgOperationStarted = false;
+        tgManager.resumeTimer(req.user.id);
+        releaseDownloadSlot?.();
+        releaseDownloadSlot = null;
+    };
+
+    // Wraps setup only (DB query through creating the stream) — not the transfer
+    // itself, which the inactivity watchdog below already guards without an overall
+    // cap (a legitimately large file must be allowed to keep taking its time as long
+    // as bytes keep arriving). This guarantees setup can't hang on a step with no
+    // timeout of its own, like pool.execute or acquireDownloadSlot's wait.
+    const setup = async () => {
+        const [fileRecords] = await pool.execute(
+            'SELECT * FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
+            [req.params.messageId, req.user.id]
+        );
+        if (fileRecords.length === 0) return { notFound: true };
+
         const fileRecord = fileRecords[0];
         const client = await tgManager.getClient(req.user);
+        // Prevent the idle-disconnect timer from killing the client mid-stream on large files
+        tgManager.pauseTimer(req.user.id);
+        tgOperationStarted = true;
+        // Telegram downloads for this user are serialized (see acquireDownloadSlot) —
+        // concurrent raw file-part requests on one connection can otherwise interleave
+        // and trigger a session reset that kills whichever request was still pending.
+        releaseDownloadSlot = await tgManager.acquireDownloadSlot(req.user.id);
 
         // Resolve peer first to add it to cache
         let chat;
@@ -335,35 +431,149 @@ router.get('/download/:messageId', authenticateUser, rateLimit(20, 60 * 1000), a
         } catch {
             try {
                 chat = await client.getChat(parseInt(fileRecord.channel_id));
-            } catch (e) {
-                return res.status(404).json({ error: 'Channel not found' });
+            } catch {
+                return { notFound: true, notFoundMessage: 'Channel not found' };
             }
         }
 
-        const messages = await client.getMessages(
-            chat,
-            parseInt(req.params.messageId)
-        );
-
+        const messages = await client.getMessages(chat, parseInt(req.params.messageId));
         const message = Array.isArray(messages) ? messages[0] : messages;
-        if (!message || !message.media)
-            return res.status(404).json({ error: 'File not found on Telegram' });
+        if (!message || !message.media) return { notFound: true };
 
-        const fileBuffer = await client.downloadAsBuffer(message.media);
+        return { fileRecord, client, message };
+    };
+
+    try {
+        const setupResult = await withTimeout(setup(), 45000, 'download setup');
+        if (setupResult.notFound) {
+            releaseTgOperation();
+            return res.status(404).json({ error: setupResult.notFoundMessage || 'File not found on Telegram' });
+        }
+        const { fileRecord, client, message } = setupResult;
+
+        const fileSize = fileRecord.file_size || message.media.fileSize || undefined;
+
+        let start = 0;
+        let end = fileSize ? fileSize - 1 : undefined;
+        let status = 200;
+
+        const range = req.headers.range;
+        if (range && fileSize) {
+            const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+            if (!match || (!match[1] && !match[2])) {
+                releaseTgOperation();
+                res.setHeader('Content-Range', `bytes */${fileSize}`);
+                return res.status(416).json({ error: 'Invalid range' });
+            }
+
+            if (match[1]) start = parseInt(match[1], 10);
+            if (match[2]) end = parseInt(match[2], 10);
+
+            if (Number.isNaN(start) || Number.isNaN(end) || start > end || end >= fileSize) {
+                releaseTgOperation();
+                res.setHeader('Content-Range', `bytes */${fileSize}`);
+                return res.status(416).json({ error: 'Range not satisfiable' });
+            }
+            status = 206;
+        }
+
+        // Telegram requires the download offset to be aligned to 4096 bytes,
+        // so we align down and trim the extra leading bytes before streaming to the client.
+        const alignedOffset = start - (start % 4096);
+        const leadingSkip = start - alignedOffset;
+        const limit = fileSize ? end - alignedOffset + 1 : undefined;
+
+        const abortController = new AbortController();
+        req.on('close', () => abortController.abort());
+
+        const tgStream = client.downloadAsNodeStream(message.media, {
+            fileSize,
+            offset: alignedOffset,
+            limit,
+            // Render's free tier has a shared/low CPU quota — fewer, larger parts means
+            // fewer round-trips. Only worth forcing for files big enough that it matters;
+            // requesting a 512KB part for a file that's only a few hundred bytes is an
+            // oversized/malformed-looking request that Telegram may not answer cleanly.
+            // Below that, let mtcute auto-pick a part size appropriate to the file.
+            partSize: fileSize && fileSize > 5 * 1024 * 1024 ? 512 : undefined,
+            abortSignal: abortController.signal,
+        });
+
+        // Client stayed disconnected from Telegram's idle-disconnect timer and held its
+        // download-queue slot for the whole transfer; release both once it's done either way.
+        res.on('close', releaseTgOperation);
+        res.on('finish', releaseTgOperation);
+
+        res.status(status);
         res.setHeader('Content-Type', fileRecord.mime_type || 'application/octet-stream');
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.original_name)}"`);
-        res.setHeader('Content-Length', fileBuffer.length);
-        res.send(Buffer.from(fileBuffer));
+        res.setHeader('Accept-Ranges', 'bytes');
+        if (fileSize) {
+            res.setHeader('Content-Length', end - start + 1);
+            if (status === 206) res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+        }
+
+        // A wedged connection can leave downloadAsNodeStream emitting neither data nor
+        // an error — this converts silence into an explicit failure so the queued
+        // downloads behind it aren't stuck waiting on a slot that never gets released.
+        let inactivityTimer;
+        const INACTIVITY_TIMEOUT = 30000;
+        const resetInactivityTimer = () => {
+            clearTimeout(inactivityTimer);
+            inactivityTimer = setTimeout(() => {
+                tgStream.destroy(new Error(`Download stalled — no data for ${INACTIVITY_TIMEOUT / 1000}s`));
+            }, INACTIVITY_TIMEOUT);
+        };
+        resetInactivityTimer();
+        tgStream.on('data', resetInactivityTimer);
+        tgStream.once('end', () => clearTimeout(inactivityTimer));
+        tgStream.once('close', () => clearTimeout(inactivityTimer));
+
+        tgStream.on('error', (err) => {
+            console.error('Download stream error:', err.message);
+            clearTimeout(inactivityTimer);
+            tgManager.forceReconnect(req.user.id);
+            if (!res.headersSent) res.status(500).json({ error: err.message });
+            res.destroy(err);
+        });
+
+        if (leadingSkip > 0) {
+            let skipped = 0;
+            tgStream.on('data', function onData(chunk) {
+                if (skipped + chunk.length <= leadingSkip) {
+                    skipped += chunk.length;
+                    return;
+                }
+                const sliceStart = leadingSkip - skipped;
+                skipped = leadingSkip;
+                tgStream.removeListener('data', onData);
+                res.write(chunk.subarray(sliceStart));
+                tgStream.pipe(res);
+            });
+        } else {
+            tgStream.pipe(res);
+        }
     } catch (err) {
         console.error('Download error:', err.message);
-        res.status(500).json({ error: err.message });
+        if (/timed out/.test(err.message)) await tgManager.forceReconnect(req.user.id);
+        releaseTgOperation();
+        if (!res.headersSent) res.status(500).json({ error: err.message });
     }
 });
 
 // ─── VIEW ─────────────────────────────────────────────────────────────────────
 
 router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async (req, res) => {
-    try {
+    // Thumbnails also pull raw file data over the shared Telegram connection, so they
+    // must go through the same per-user queue as /download or they can interleave with
+    // an in-progress download and trigger the same session-reset problem.
+    let tgOperationStarted = false;
+    let releaseDownloadSlot = null;
+
+    // Wrapping the whole body (not just individual calls) means the request can never
+    // hang past this no matter which step turns out to be the stuck one — including
+    // ones with no timeout of their own, like pool.execute or acquireDownloadSlot's wait.
+    const run = async () => {
         const [fileRecords] = await pool.execute(
             'SELECT * FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
             [req.params.messageId, req.user.id]
@@ -372,12 +582,12 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
 
         const fileRecord = fileRecords[0];
         const client = await tgManager.getClient(req.user);
+        tgManager.pauseTimer(req.user.id);
+        tgOperationStarted = true;
+        releaseDownloadSlot = await tgManager.acquireDownloadSlot(req.user.id);
 
         // mtcute getMessages signature: (chatId, messageIds, fromReply?)
-        const messages = await client.getMessages(
-            parseInt(fileRecord.channel_id),
-            parseInt(req.params.messageId)
-        );
+        const messages = await client.getMessages(parseInt(fileRecord.channel_id), parseInt(req.params.messageId));
 
         const message = Array.isArray(messages) ? messages[0] : messages;
         if (!message || !message.media)
@@ -388,8 +598,19 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
         res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileRecord.original_name)}"`);
         res.setHeader('Content-Length', fileBuffer.length);
         res.send(Buffer.from(fileBuffer));
+    };
+
+    try {
+        await withTimeout(run(), 45000, 'view request');
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('View error:', err.message);
+        if (/timed out/.test(err.message)) await tgManager.forceReconnect(req.user.id);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+    } finally {
+        if (tgOperationStarted) {
+            tgManager.resumeTimer(req.user.id);
+            releaseDownloadSlot?.();
+        }
     }
 });
 
@@ -439,13 +660,30 @@ router.delete('/files/:id', authenticateUser, async (req, res) => {
         if (files.length === 0) return res.status(404).json({ error: 'File not found' });
 
         const file = files[0];
-        try {
-            const client = await tgManager.getClient(req.user);
-            // mtcute deleteMessagesById
-            await client.deleteMessagesById(parseInt(file.channel_id), [parseInt(file.telegram_message_id)], { revoke: true });
-            console.log(`🗑️ Deleted message ${file.telegram_message_id} from Telegram`);
-        } catch (tgErr) {
-            console.error('Telegram delete error:', tgErr.message);
+
+        // Copies (see POST /files/:id/copy) share the same underlying Telegram message —
+        // only delete it from Telegram once the last reference to it is being removed.
+        const [otherRefs] = await pool.execute(
+            'SELECT id FROM uploaded_files WHERE channel_id = ? AND telegram_message_id = ? AND user_id = ? AND id != ?',
+            [file.channel_id, file.telegram_message_id, req.user.id, file.id]
+        );
+
+        if (otherRefs.length === 0) {
+            try {
+                const client = await tgManager.getClient(req.user);
+                tgManager.pauseTimer(req.user.id);
+                const releaseDownloadSlot = await tgManager.acquireDownloadSlot(req.user.id);
+                try {
+                    // mtcute deleteMessagesById
+                    await client.deleteMessagesById(parseInt(file.channel_id), [parseInt(file.telegram_message_id)], { revoke: true });
+                    console.log(`🗑️ Deleted message ${file.telegram_message_id} from Telegram`);
+                } finally {
+                    tgManager.resumeTimer(req.user.id);
+                    releaseDownloadSlot();
+                }
+            } catch (tgErr) {
+                console.error('Telegram delete error:', tgErr.message);
+            }
         }
 
         const [result] = await pool.execute('DELETE FROM uploaded_files WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
@@ -456,11 +694,70 @@ router.delete('/files/:id', authenticateUser, async (req, res) => {
     }
 });
 
+// ─── MOVE FILE (drag & drop into a folder, or cut+paste) ─────────────────────
+
+router.put('/files/:id/move', authenticateUser, async (req, res) => {
+    try {
+        const folderId = req.body.folderId || null;
+        if (folderId) {
+            const [folders] = await pool.execute('SELECT id FROM folders WHERE id = ? AND user_id = ?', [folderId, req.user.id]);
+            if (folders.length === 0) return res.status(404).json({ error: 'Target folder not found' });
+        }
+        const [result] = await pool.execute(
+            'UPDATE uploaded_files SET folder_id = ? WHERE id = ? AND user_id = ?',
+            [folderId, req.params.id, req.user.id]
+        );
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'File not found' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── COPY FILE (copy+paste) ───────────────────────────────────────────────────
+// The copy shares the same underlying Telegram message rather than re-uploading —
+// cheap and instant, at the cost of both entries pointing at one file (handled in
+// DELETE above, which only removes the Telegram message once the last entry referencing
+// it is deleted).
+
+router.post('/files/:id/copy', authenticateUser, async (req, res) => {
+    try {
+        const folderId = req.body.folderId || null;
+        if (folderId) {
+            const [folders] = await pool.execute('SELECT id FROM folders WHERE id = ? AND user_id = ?', [folderId, req.user.id]);
+            if (folders.length === 0) return res.status(404).json({ error: 'Target folder not found' });
+        }
+        const [files] = await pool.execute('SELECT * FROM uploaded_files WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+        if (files.length === 0) return res.status(404).json({ error: 'File not found' });
+
+        const src = files[0];
+        const newId = uuidv4();
+        await pool.execute(
+            `INSERT INTO uploaded_files
+             (id, user_id, original_name, file_size, mime_type, telegram_message_id, channel_id, folder_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            [newId, req.user.id, src.original_name, src.file_size, src.mime_type, src.telegram_message_id, src.channel_id, folderId]
+        );
+        res.json({
+            success: true,
+            file: { id: newId, original_name: src.original_name, file_size: src.file_size, mime_type: src.mime_type, telegram_message_id: src.telegram_message_id, channel_id: src.channel_id, folder_id: folderId },
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ─── SYNC CHANNELS FROM TELEGRAM ─────────────────────────────────────────
 router.post('/sync-channels', authenticateUser, async (req, res) => {
+    // A dialog sync can iterate hundreds of dialogs and take a while — sharing the
+    // per-user Telegram connection with an in-progress download/view without going
+    // through the same queue lets their requests interleave and stall each other.
+    let releaseDownloadSlot = null;
     try {
         const user = req.user;
         const client = await tgManager.getClient(user);
+        tgManager.pauseTimer(user.id);
+        releaseDownloadSlot = await tgManager.acquireDownloadSlot(user.id);
 
         const channels = [];
         let count = 0;
@@ -501,6 +798,9 @@ router.post('/sync-channels', authenticateUser, async (req, res) => {
         res.json({ success: true, synced: channels.length, channels });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    } finally {
+        tgManager.resumeTimer(req.user.id);
+        releaseDownloadSlot?.();
     }
 });
 

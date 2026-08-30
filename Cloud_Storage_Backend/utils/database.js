@@ -13,6 +13,11 @@ const pool = mysql.createPool({
     queueLimit:         0,    
     waitForConnections: true,
     connectTimeout:     30000,
+    // Aiven's server clock/session is UTC, but mysql2 defaults to interpreting raw
+    // DATETIME values as being in the Node process's local timezone — on a host set to
+    // IST (UTC+5:30) that silently shifted every created_at 5.5 hours into the past.
+    // 'Z' tells mysql2 the raw values ARE UTC, so Date objects come out correct.
+    timezone: 'Z',
     ssl: { rejectUnauthorized: false },
     enableKeepAlive:    true,
     keepAliveInitialDelay: 30000,
