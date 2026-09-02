@@ -394,6 +394,15 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000
     // so the catch block below only tears down what this request actually holds.
     let tgOperationStarted = false;
     let releaseDownloadSlot = null;
+    // Once the outer withTimeout below gives up on setup(), setup() itself keeps
+    // running in the background (withTimeout only stops waiting on it, it can't
+    // cancel it). If setup() was still waiting for its turn in acquireDownloadSlot
+    // at that moment, releaseTgOperation() below fires as a no-op (nothing to
+    // release yet) and then never runs again — so when the abandoned setup()
+    // finally gets the slot, it would hold it forever with nobody left to release
+    // it, wedging every request queued behind it. This flag lets setup() notice
+    // it's been abandoned and release the slot itself instead of leaking it.
+    let abandoned = false;
     const releaseTgOperation = () => {
         if (!tgOperationStarted) return;
         tgOperationStarted = false;
@@ -423,6 +432,11 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000
         // concurrent raw file-part requests on one connection can otherwise interleave
         // and trigger a session reset that kills whichever request was still pending.
         releaseDownloadSlot = await tgManager.acquireDownloadSlot(req.user.id);
+
+        if (abandoned) {
+            releaseTgOperation();
+            throw new Error('download setup abandoned after timeout');
+        }
 
         // Resolve peer first to add it to cache
         let chat;
@@ -554,6 +568,7 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000
             tgStream.pipe(res);
         }
     } catch (err) {
+        abandoned = true;
         console.error('Download error:', err.message);
         if (/timed out/.test(err.message)) await tgManager.forceReconnect(req.user.id);
         releaseTgOperation();
@@ -569,6 +584,18 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
     // an in-progress download and trigger the same session-reset problem.
     let tgOperationStarted = false;
     let releaseDownloadSlot = null;
+    // See the matching comment in /download above: once the outer withTimeout gives
+    // up, run() keeps executing in the background, and if it was still waiting for
+    // acquireDownloadSlot at that moment it would otherwise acquire and never
+    // release the slot, wedging every request queued behind it for this user.
+    let abandoned = false;
+    const releaseTgOperation = () => {
+        if (!tgOperationStarted) return;
+        tgOperationStarted = false;
+        tgManager.resumeTimer(req.user.id);
+        releaseDownloadSlot?.();
+        releaseDownloadSlot = null;
+    };
 
     // Wrapping the whole body (not just individual calls) means the request can never
     // hang past this no matter which step turns out to be the stuck one — including
@@ -585,6 +612,11 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
         tgManager.pauseTimer(req.user.id);
         tgOperationStarted = true;
         releaseDownloadSlot = await tgManager.acquireDownloadSlot(req.user.id);
+
+        if (abandoned) {
+            releaseTgOperation();
+            throw new Error('view request abandoned after timeout');
+        }
 
         // mtcute getMessages signature: (chatId, messageIds, fromReply?)
         const messages = await client.getMessages(parseInt(fileRecord.channel_id), parseInt(req.params.messageId));
@@ -603,14 +635,12 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
     try {
         await withTimeout(run(), 45000, 'view request');
     } catch (err) {
+        abandoned = true;
         console.error('View error:', err.message);
         if (/timed out/.test(err.message)) await tgManager.forceReconnect(req.user.id);
         if (!res.headersSent) res.status(500).json({ error: err.message });
     } finally {
-        if (tgOperationStarted) {
-            tgManager.resumeTimer(req.user.id);
-            releaseDownloadSlot?.();
-        }
+        releaseTgOperation();
     }
 });
 
