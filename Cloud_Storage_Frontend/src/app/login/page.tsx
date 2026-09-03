@@ -48,7 +48,13 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <form className="space-y-6">
+        <form
+          className="space-y-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSubmit();
+          }}
+        >
           <div>
             <label className="block text-sm font-medium text-black dark:text-white mb-2">
               Email or Phone Number
@@ -86,8 +92,7 @@ export default function LoginPage() {
           )}
 
           <button
-            type="button"
-            onClick={handleSubmit}
+            type="submit"
             disabled={loading}
             className="cursor-pointer w-full py-3 bg-black dark:bg-white text-white dark:text-black rounded-lg font-medium hover:bg-gray-800 dark:hover:bg-gray-200 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >

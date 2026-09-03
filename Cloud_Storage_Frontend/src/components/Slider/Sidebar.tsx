@@ -3,6 +3,7 @@
 import { usePathname, useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import apiService from '@/services/api';
 import {
     LayoutDashboard,
     FolderOpen,
@@ -85,7 +86,7 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
     const handleLogout = () => {
         localStorage.removeItem('theme');
         sessionStorage.removeItem('telegram_user_account');
-        sessionStorage.removeItem('token');
+        apiService.clearToken();
         router.push('/');
     };
 

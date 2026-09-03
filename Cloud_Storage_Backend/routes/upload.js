@@ -570,7 +570,11 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000
     } catch (err) {
         abandoned = true;
         console.error('Download error:', err.message);
-        if (/timed out/.test(err.message)) await tgManager.forceReconnect(req.user.id);
+        // Any failure once we'd already reached the Telegram client (not just ones
+        // whose message happens to say "timed out") is grounds for suspicion that the
+        // connection itself is wedged — reconnect so the next request gets a fresh one
+        // instead of piling up behind the same broken client.
+        if (tgOperationStarted) tgManager.forceReconnect(req.user.id);
         releaseTgOperation();
         if (!res.headersSent) res.status(500).json({ error: err.message });
     }
@@ -637,7 +641,9 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
     } catch (err) {
         abandoned = true;
         console.error('View error:', err.message);
-        if (/timed out/.test(err.message)) await tgManager.forceReconnect(req.user.id);
+        // See the matching comment in /download: reconnect on any failure once we'd
+        // already reached the Telegram client, not just ones matching "timed out".
+        if (tgOperationStarted) tgManager.forceReconnect(req.user.id);
         if (!res.headersSent) res.status(500).json({ error: err.message });
     } finally {
         releaseTgOperation();

@@ -157,13 +157,21 @@ class TelegramClientManager {
     // Forcibly drops a client regardless of activeOps — used when an operation on it
     // hung or errored out in a way that suggests the underlying connection is wedged,
     // so the next request gets a fresh connection instead of piling up behind a dead one.
-    async forceReconnect(userId) {
+    forceReconnect(userId) {
         const entry = this.clients.get(userId);
         if (!entry) return;
         clearTimeout(entry.timer);
         this.clients.delete(userId);
-        try { await entry.client.disconnect(); } catch (_) { }
-        console.log(`♻️ mtcute client force-reconnected for user ${userId}`);
+        // Not async / not awaited: disconnect() on a wedged connection can itself
+        // hang waiting on network I/O that will never arrive. The entry is already
+        // out of the cache, so no future getClient() call depends on this finishing.
+        // Callers used to `await` this before releasing their download-queue slot and
+        // responding — if disconnect() hung, that slot (and the in-flight HTTP
+        // response) would be stuck until the 10-minute safety valve, effectively
+        // wedging every queued request behind it until a manual restart.
+        entry.client.disconnect()
+            .then(() => console.log(`♻️ mtcute client force-reconnected for user ${userId}`))
+            .catch(() => {});
     }
 
     async disconnectAll() {
