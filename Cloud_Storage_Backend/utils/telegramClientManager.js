@@ -1,7 +1,12 @@
 const { TelegramClient } = require('@mtcute/node');
 const { MemoryStorage } = require('@mtcute/core');
 const MAX_CACHED_CLIENTS = 4;
-const CLIENT_IDLE_TIMEOUT = 5 * 60 * 1000;
+// Was 5 minutes — during normal browsing with a few minutes between actions, that
+// meant a fresh connect()/disconnect() cycle on the same auth key every few minutes,
+// all day. Repeated reconnects like that are a plausible contributor to the account
+// getting flagged; widening this cuts how often we touch Telegram at all for the same
+// usage pattern, at the cost of a somewhat longer-lived idle connection.
+const CLIENT_IDLE_TIMEOUT = 30 * 60 * 1000;
 // Hard ceiling on how long one request may hold a user's download slot. Route-level
 // timeouts should always release well before this, but this is the backstop: without
 // it, any caller that fails to release (a bug, an edge case, a crash mid-request)
@@ -85,6 +90,15 @@ class TelegramClientManager {
 
     async getClient(user) {
         const userId = user.id;
+
+        // No session on file at all (cleared after a revoke, or never linked) — same
+        // "reconnect required" outcome as a known-dead session, just without needing to
+        // attempt a connection first to find out. Without this, importSession('') throws
+        // its own low-level "Invalid session string" error, which is accurate but isn't
+        // recognized as sessionRevoked, so it wasn't surfaced as a clean reconnect prompt.
+        if (!user.telegram_session) {
+            throw new SessionRevokedError();
+        }
 
         // Fail fast on a session we already know is revoked, rather than opening yet
         // another connection that Telegram will just stall. Matching on the session
