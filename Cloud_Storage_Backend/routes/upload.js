@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const busboy = require('busboy');
 const { Readable } = require('stream');
-const { InputMedia } = require('@mtcute/node');
+const { InputMedia, Thumbnail } = require('@mtcute/node');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const pool = require('../utils/database');
@@ -20,6 +20,12 @@ async function authenticateUser(req, res, next) {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.userId]);
         if (users.length === 0) return res.status(401).json({ error: 'User not found' });
+        // Reject tokens issued before the password was last reset, so a password
+        // change actually forces a fresh login instead of leaving old sessions valid.
+        const passwordChangedAt = users[0].password_changed_at;
+        if (passwordChangedAt && decoded.iat * 1000 < new Date(passwordChangedAt).getTime()) {
+            return res.status(401).json({ error: 'Password was changed. Please log in again.' });
+        }
         req.user = users[0];
         next();
     } catch (err) {
@@ -629,8 +635,18 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
         if (!message || !message.media)
             return res.status(404).json({ error: 'File not found on Telegram' });
 
-        const fileBuffer = await client.downloadAsBuffer(message.media);
-        res.setHeader('Content-Type', fileRecord.mime_type || 'application/octet-stream');
+        // Grid thumbnails only need Telegram's small pre-generated preview (a few KB),
+        // not the full original file. Downloading the whole thing just to render a
+        // thumbnail wastes memory and CPU decrypting it — on a memory-capped host that
+        // can OOM the process once a few multi-MB images load thumbnails at once.
+        const wantsThumbnail = req.query.thumb === '1';
+        const thumb = wantsThumbnail
+            ? (message.media.getThumbnail?.(Thumbnail.THUMB_320x320_BOX) || message.media.thumbnails?.[0])
+            : null;
+        const mediaToFetch = thumb || message.media;
+
+        const fileBuffer = await client.downloadAsBuffer(mediaToFetch);
+        res.setHeader('Content-Type', thumb ? 'image/jpeg' : (fileRecord.mime_type || 'application/octet-stream'));
         res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileRecord.original_name)}"`);
         res.setHeader('Content-Length', fileBuffer.length);
         res.send(Buffer.from(fileBuffer));

@@ -130,9 +130,31 @@ class ApiService {
             success: boolean;
             token: string;
             user: any;
+            telegramReconnectRequired: boolean;
         }>('/api/auth/login', {
             method: 'POST',
             body: { identifier, password },
+        });
+    }
+
+    // Re-links Telegram when /login reports telegramReconnectRequired — same OTP (+
+    // 2FA if needed) dance as signup, but against the already-logged-in user.
+    async reconnectTelegramSendCode() {
+        return this.request<{ success: boolean; message: string }>('/api/auth/reconnect-send-code', {
+            method: 'POST',
+        });
+    }
+
+    async reconnectTelegramVerify(code?: string, password?: string) {
+        return this.request<{
+            success: boolean;
+            message?: string;
+            error?: string;
+            requirePassword?: boolean;
+            invalidPassword?: boolean;
+        }>('/api/auth/reconnect-verify', {
+            method: 'POST',
+            body: { code, password },
         });
     }
 
@@ -255,8 +277,9 @@ class ApiService {
         return token;
     }
 
-    async viewFileAsBlob(messageId: string): Promise<Blob> {
+    async viewFileAsBlob(messageId: string, thumbnail: boolean = false): Promise<Blob> {
         const response = await this.axiosInstance.get(`/api/view/${messageId}`, {
+            params: thumbnail ? { thumb: '1' } : undefined,
             responseType: 'blob',
         });
         return response.data;

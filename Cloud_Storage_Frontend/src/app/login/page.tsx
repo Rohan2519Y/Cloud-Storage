@@ -27,7 +27,7 @@ export default function LoginPage() {
       if (response.success) {
         apiService.setToken(response.token);
         sessionStorage.setItem('telegram_user_account', JSON.stringify(response.user));
-        router.push('/dashboard');
+        router.push(response.telegramReconnectRequired ? '/reconnect-telegram' : '/dashboard');
       }
     } catch (err: any) {
       setError(err.response?.data?.error || err.message || 'Login failed');
@@ -64,7 +64,8 @@ export default function LoginPage() {
               value={emailOrPhone}
               onChange={(e) => setEmailOrPhone(e.target.value)}
               autoComplete="username"
-              className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent transition"
+              disabled={loading}
+              className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent transition disabled:opacity-50"
               placeholder="Enter your email or phone"
               required
             />
@@ -79,7 +80,8 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
-              className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent transition"
+              disabled={loading}
+              className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent transition disabled:opacity-50"
               placeholder="Enter your password"
               required
             />

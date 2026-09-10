@@ -8,6 +8,18 @@ const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
 const pool = require('../utils/database');
 const { sendMail, generateResetToken, verifyResetToken } = require('../utils/mailer');
+const { encrypt, decrypt } = require('../utils/crypto');
+const tgManager = require('../utils/telegramClientManager');
+
+// A wedged MTProto connection can leave a call pending forever with no error — timing
+// it out turns that into a normal failure instead of hanging the request.
+function withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // ─── JWT helpers ────────────────────────────────────────────────────────────
 
@@ -64,6 +76,12 @@ async function authenticate(req, res, next) {
         const decoded = verifyToken(token);
         const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.userId]);
         if (users.length === 0) return res.status(401).json({ error: 'User not found' });
+        // Reject tokens issued before the password was last reset, so a password
+        // change actually forces a fresh login instead of leaving old sessions valid.
+        const passwordChangedAt = users[0].password_changed_at;
+        if (passwordChangedAt && decoded.iat * 1000 < new Date(passwordChangedAt).getTime()) {
+            return res.status(401).json({ error: 'Password was changed. Please log in again.' });
+        }
         req.user = users[0];
         req.decoded = decoded;
         next();
@@ -150,31 +168,45 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
         }
 
         // ── Step 1: Sign in with OTP ──────────────────────────────────────
-        try {
-            await tempData.client.signIn({
-                phone: phoneNumber,
-                phoneCodeHash: tempData.phoneCodeHash,
-                phoneCode: String(code),
-            });
-        } catch (signInError) {
-            if (String(signInError.message).includes('SESSION_PASSWORD_NEEDED')) {
-                const twoFAPassword = req.body.password;
-                if (!twoFAPassword) {
-                    await tempData.client.disconnect();
-                    tempLogins.delete(phoneNumber);
-                    return res.status(401).json({ error: '2FA password required', requirePassword: true });
+        // Only attempted once per session — once Telegram tells us 2FA is needed,
+        // the phone+code step has already succeeded, so a retry (e.g. after a wrong
+        // 2FA password) must go straight to checkPassword rather than redoing signIn,
+        // which would just throw SESSION_PASSWORD_NEEDED again.
+        if (!tempData.awaiting2FA) {
+            try {
+                await tempData.client.signIn({
+                    phone: phoneNumber,
+                    phoneCodeHash: tempData.phoneCodeHash,
+                    phoneCode: String(code),
+                });
+            } catch (signInError) {
+                if (String(signInError.message).includes('SESSION_PASSWORD_NEEDED')) {
+                    tempData.awaiting2FA = true;
+                } else {
+                    throw signInError;
                 }
-                try {
-                    await tempData.client.checkPassword(twoFAPassword);
-                } catch (pwdErr) {
-                    console.error('2FA error:', pwdErr.message);
-                    await tempData.client.disconnect();
-                    tempLogins.delete(phoneNumber);
-                    return res.status(401).json({ error: 'Invalid 2FA password.', invalidPassword: true });
-                }
-            } else {
-                throw signInError;
             }
+        }
+
+        if (tempData.awaiting2FA) {
+            const twoFAPassword = req.body.password;
+            if (!twoFAPassword) {
+                // Don't tear down the session — the phone+code step already succeeded.
+                // Let the client re-prompt for the (possibly changed) password and
+                // resubmit against this same still-connected session.
+                return res.status(401).json({ error: '2FA password required', requirePassword: true });
+            }
+            try {
+                await tempData.client.checkPassword(twoFAPassword);
+            } catch (pwdErr) {
+                console.error('2FA error:', pwdErr.message);
+                // Wrong/stale password (e.g. it was changed on Telegram's side) — ask
+                // again instead of forcing the user all the way back to a new OTP.
+                return res.status(401).json({ error: 'Invalid 2FA password. Please try again.', invalidPassword: true });
+            }
+            // Remembered (encrypted) so a later broken/revoked session can be silently
+            // re-checked against it — see /reconnect-verify.
+            tempData.verified2FAPassword = twoFAPassword;
         }
 
         const me = await tempData.client.getMe();
@@ -218,6 +250,9 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
         const telegramId = me.id.toString();
         const resolvedGroupId = groupId || channelEntity?.id?.toString() || null;
         const resolvedChannelUsername = groupUsername || channelEntity?.username || null;
+        // NULL when this account has no 2FA — also clears a previously stored password
+        // if the user has since disabled 2FA on Telegram's side.
+        const encrypted2FAPassword = tempData.verified2FAPassword ? encrypt(tempData.verified2FAPassword) : null;
 
         const [existingUsers] = await pool.execute(
             'SELECT * FROM users WHERE phone_number = ?', [phoneNumber]
@@ -229,20 +264,20 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
             await pool.execute(
                 `UPDATE users SET telegram_session=?, telegram_id=?, username=?, first_name=?,
                  last_name=?, telegram_api_id=?, telegram_api_hash=?, default_group_id=?,
-                 default_channel_username=?, last_login=NOW() WHERE phone_number=?`,
+                 default_channel_username=?, telegram_2fa_password_enc=?, last_login=NOW() WHERE phone_number=?`,
                 [sessionString, telegramId, me.username, me.firstName, me.lastName,
-                    tempData.apiId, tempData.apiHash, resolvedGroupId, resolvedChannelUsername, phoneNumber]
+                    tempData.apiId, tempData.apiHash, resolvedGroupId, resolvedChannelUsername, encrypted2FAPassword, phoneNumber]
             );
         } else {
             userId = uuidv4();
             await pool.execute(
                 `INSERT INTO users (id, phone_number, telegram_session, telegram_id, username,
                  first_name, last_name, telegram_api_id, telegram_api_hash,
-                 default_group_id, default_channel_username)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 default_group_id, default_channel_username, telegram_2fa_password_enc)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [userId, phoneNumber, sessionString, telegramId, me.username,
                     me.firstName, me.lastName, tempData.apiId, tempData.apiHash,
-                    resolvedGroupId, resolvedChannelUsername]
+                    resolvedGroupId, resolvedChannelUsername, encrypted2FAPassword]
             );
         }
 
@@ -380,8 +415,34 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
 
         const token = signToken({ userId: user.id, phoneNumber: user.phone_number, defaultGroupId: user.default_group_id });
 
+        // Every login double-checks the stored Telegram session still works. Telegram
+        // doesn't invalidate it just because the 2FA password changed — but it does if
+        // the user revoked/terminated it on Telegram's side, which commonly happens
+        // right around a password change. A dead session would otherwise fail silently
+        // on the next upload/download; catching it here sends the user to reconnect
+        // immediately instead. Only a definitive "this session is dead" error counts —
+        // a transient timeout on a flaky connection must not force a needless reconnect.
+        // Deliberately not routed through acquireDownloadSlot: that queue exists to
+        // stop raw file-part requests from interleaving on one connection, which a
+        // plain getMe() call never touches — and login must never be able to hang
+        // waiting on a queue slot the way a wedged download/view already could before
+        // that was fixed elsewhere.
+        let telegramReconnectRequired = false;
+        try {
+            const client = await withTimeout(tgManager.getClient(user), 15000, 'telegram health check connect');
+            await withTimeout(client.getMe(), 10000, 'telegram health check getMe');
+        } catch (healthErr) {
+            if (/AUTH_KEY_UNREGISTERED|AUTH_KEY_INVALID|SESSION_REVOKED|USER_DEACTIVATED/.test(healthErr.message)) {
+                console.warn(`⚠️ Telegram session dead for user ${user.id}: ${healthErr.message}`);
+                telegramReconnectRequired = true;
+            } else {
+                console.warn(`Telegram health check inconclusive for user ${user.id} (treating as OK): ${healthErr.message}`);
+            }
+        }
+
         res.json({
             success: true, token,
+            telegramReconnectRequired,
             user: {
                 id: user.id, email: user.email, phoneNumber: user.phone_number,
                 username: user.username, firstName: user.first_name, lastName: user.last_name,
@@ -390,6 +451,156 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
             },
         });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── TELEGRAM RECONNECT — used when /login reports telegramReconnectRequired ──
+// Same OTP + 2FA dance as signup, but scoped to the already-authenticated user
+// instead of a phone-number-keyed public session, and it overwrites telegram_session
+// (and the stored 2FA password, if a new one was needed) on this same user row.
+
+const reconnectSessions = new Map(); // userId -> { client, phoneCodeHash, expiresAt, awaiting2FA, triedStoredPassword }
+
+setInterval(async () => {
+    const now = Date.now();
+    for (const [userId, data] of reconnectSessions) {
+        if (now > data.expiresAt) {
+            try { await data.client.disconnect(); } catch (_) { }
+            reconnectSessions.delete(userId);
+        }
+    }
+}, 60 * 1000);
+
+router.post('/reconnect-send-code', authenticate, rateLimit(5, 60 * 1000), async (req, res) => {
+    try {
+        const user = req.user;
+        if (!user.telegram_api_id || !user.telegram_api_hash) {
+            return res.status(400).json({ error: 'No Telegram API credentials on file — link Telegram again from Sign Up.' });
+        }
+
+        const existing = reconnectSessions.get(user.id);
+        if (existing) {
+            try { await existing.client.disconnect(); } catch (_) { }
+            reconnectSessions.delete(user.id);
+        }
+
+        const client = new TelegramClient({
+            apiId: Number(user.telegram_api_id),
+            apiHash: user.telegram_api_hash,
+            storage: new MemoryStorage(),
+        });
+        await client.connect();
+        const sentCode = await client.sendCode({ phone: user.phone_number });
+
+        reconnectSessions.set(user.id, {
+            client,
+            phoneCodeHash: sentCode.phoneCodeHash,
+            expiresAt: Date.now() + 5 * 60 * 1000,
+            awaiting2FA: false,
+            triedStoredPassword: false,
+        });
+
+        res.json({ success: true, message: 'Code sent to Telegram' });
+    } catch (err) {
+        console.error('Reconnect send-code error:', err.message);
+        if (err.message.includes('FLOOD_WAIT')) {
+            const waitSeconds = err.message.match(/FLOOD_WAIT_(\d+)/)?.[1];
+            return res.status(429).json({
+                error: `Too many attempts. Please wait ${Math.ceil(waitSeconds / 60)} minutes and try again.`,
+                retryAfter: parseInt(waitSeconds),
+            });
+        }
+        res.status(500).json({ error: err.message });
+    }
+});
+
+router.post('/reconnect-verify', authenticate, rateLimit(10, 60 * 1000), async (req, res) => {
+    const user = req.user;
+    const session = reconnectSessions.get(user.id);
+    try {
+        if (!session) return res.status(400).json({ error: 'Reconnect session expired. Request a new code.' });
+        if (Date.now() > session.expiresAt) {
+            try { await session.client.disconnect(); } catch (_) { }
+            reconnectSessions.delete(user.id);
+            return res.status(400).json({ error: 'Code expired. Request a new one.' });
+        }
+
+        const { code } = req.body;
+
+        if (!session.awaiting2FA) {
+            if (!code) return res.status(400).json({ error: 'Verification code required' });
+            try {
+                await session.client.signIn({
+                    phone: user.phone_number,
+                    phoneCodeHash: session.phoneCodeHash,
+                    phoneCode: String(code),
+                });
+            } catch (signInError) {
+                if (String(signInError.message).includes('SESSION_PASSWORD_NEEDED')) {
+                    session.awaiting2FA = true;
+                } else {
+                    throw signInError;
+                }
+            }
+        }
+
+        if (session.awaiting2FA) {
+            let passwordToTry = req.body.password;
+            let isStoredAttempt = false;
+
+            // First attempt: silently try the password we already have on file,
+            // before ever bothering the user — this is the "check the saved 2FA
+            // password" step.
+            if (!passwordToTry && !session.triedStoredPassword && user.telegram_2fa_password_enc) {
+                passwordToTry = decrypt(user.telegram_2fa_password_enc);
+                isStoredAttempt = true;
+            }
+
+            // 400, not 401: the user's JWT is perfectly valid here, this just means
+            // "send more info" — a 401 would trip the frontend's global interceptor,
+            // which clears the token and hard-redirects to /login on any 401, wiping
+            // the very session this flow is trying to fix.
+            if (!passwordToTry) {
+                return res.status(400).json({ error: '2FA password required', requirePassword: true });
+            }
+
+            try {
+                await session.client.checkPassword(passwordToTry);
+            } catch (pwdErr) {
+                if (isStoredAttempt) {
+                    session.triedStoredPassword = true;
+                    console.warn(`Stored 2FA password no longer works for user ${user.id} — asking for the new one.`);
+                    return res.status(400).json({ error: 'Your saved 2FA password no longer works. Please enter the current one.', requirePassword: true });
+                }
+                console.error('Reconnect 2FA error:', pwdErr.message);
+                return res.status(400).json({ error: 'Invalid 2FA password. Please try again.', invalidPassword: true });
+            }
+
+            // A password the user had to type by hand (not the auto-tried stored one)
+            // just proved correct — refresh the stored copy so future reconnects work
+            // silently again.
+            if (!isStoredAttempt) {
+                await pool.execute('UPDATE users SET telegram_2fa_password_enc = ? WHERE id = ?', [encrypt(passwordToTry), user.id]);
+            }
+        }
+
+        const sessionString = await session.client.exportSession();
+        await session.client.disconnect();
+        reconnectSessions.delete(user.id);
+
+        await pool.execute('UPDATE users SET telegram_session = ?, last_login = NOW() WHERE id = ?', [sessionString, user.id]);
+        // The cached client (if any) still holds the dead session — drop it so the
+        // next Telegram operation picks up the freshly reconnected one.
+        await tgManager.forceReconnect(user.id);
+
+        res.json({ success: true, message: 'Telegram reconnected' });
+    } catch (err) {
+        console.error('Reconnect verify error:', err.message);
+        if (session?.client) {
+            try { await session.client.disconnect(); } catch (_) { }
+            reconnectSessions.delete(user.id);
+        }
         res.status(500).json({ error: err.message });
     }
 });
@@ -442,8 +653,11 @@ router.post('/reset-password', rateLimit(10, 60 * 1000), async (req, res) => {
         if (!decoded) return res.status(400).json({ error: 'Invalid or expired token' });
 
         const password_hash = await bcrypt.hash(newPassword, 10);
+        // password_changed_at invalidates any JWT issued before this moment (see
+        // `authenticate`) — otherwise sessions started under the old password would
+        // stay valid for up to 7 more days after a reset.
         await pool.execute(
-            'UPDATE users SET password_hash = ? WHERE id = ?',
+            'UPDATE users SET password_hash = ?, password_changed_at = NOW() WHERE id = ?',
             [password_hash, decoded.userId]
         );
 

@@ -205,7 +205,7 @@ export default function FilesPage() {
 
     const loadThumbnail = useCallback(async (messageId: string) => {
         try {
-            const blob = await apiService.viewFileAsBlob(messageId)
+            const blob = await apiService.viewFileAsBlob(messageId, true)
             const url = URL.createObjectURL(blob)
             thumbnailUrlMapRef.current[messageId] = url
             setThumbnailUrls((prev) => ({ ...prev, [messageId]: url }))
