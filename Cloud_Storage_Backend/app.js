@@ -1,9 +1,9 @@
 // app.js — production-ready with @mtcute/node
 const express = require('express');
 const path = require('path');
-const cookieParser = require('cookie-parser');
 const logger = require('morgan');
 const cors = require('cors');
+const helmet = require('helmet');
 
 const authRoutes = require('./routes/auth');
 const uploadRouter = require('./routes/upload');
@@ -11,21 +11,35 @@ const tgManager = require('./utils/telegramClientManager');
 
 const app = express();
 
-// ─── Security headers (no extra package needed) ────────────────────────────
-app.use((req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-    next();
-});
+// ─── Security headers ────────────────────────────────────────────────────
+// CSP disabled: public/index.html is a static status page with inline <style>
+// and isn't part of the app's real security surface (the actual frontend is a
+// separate app on Vercel) — not worth hand-tuning a policy for it.
+app.use(helmet({ contentSecurityPolicy: false }));
 
 // ─── CORS ──────────────────────────────────────────────────────────────────
-app.use(cors());
+// Wide open in dev for convenience; in production, restricted to ALLOWED_ORIGINS
+// (comma-separated) so any site can't ride an authenticated user's browser to
+// this API — previously this was unrestricted even in production despite
+// ALLOWED_ORIGINS already being set and used elsewhere (password reset emails).
+const isProduction = process.env.NODE_ENV === 'production';
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!isProduction || !origin || allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        callback(new Error('Not allowed by CORS'));
+    },
+}));
 
 // ─── Body parsing ──────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: false, limit: '10mb' }));
-app.use(cookieParser());
 
 // ─── Logging ───────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'production') {

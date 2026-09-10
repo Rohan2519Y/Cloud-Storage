@@ -48,6 +48,11 @@ class ApiService {
                         window.location.href = '/login';
                     }
                 }
+                // No automatic redirect to /reconnect-telegram on a revoked Telegram
+                // session — that's a deliberate choice: sign-in stays a plain id+password
+                // flow with no OTP interruption, ever. If a file action fails because
+                // the Telegram session is dead, it just shows as a normal error; from
+                // Settings, "Reconnect Telegram" is available if the user chooses it.
                 return Promise.reject(error);
             }
         );
@@ -130,7 +135,6 @@ class ApiService {
             success: boolean;
             token: string;
             user: any;
-            telegramReconnectRequired: boolean;
         }>('/api/auth/login', {
             method: 'POST',
             body: { identifier, password },

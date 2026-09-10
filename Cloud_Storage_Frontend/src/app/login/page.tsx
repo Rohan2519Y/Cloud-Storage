@@ -27,7 +27,7 @@ export default function LoginPage() {
       if (response.success) {
         apiService.setToken(response.token);
         sessionStorage.setItem('telegram_user_account', JSON.stringify(response.user));
-        router.push(response.telegramReconnectRequired ? '/reconnect-telegram' : '/dashboard');
+        router.push('/dashboard');
       }
     } catch (err: any) {
       setError(err.response?.data?.error || err.message || 'Login failed');

@@ -10,16 +10,7 @@ const pool = require('../utils/database');
 const { sendMail, generateResetToken, verifyResetToken } = require('../utils/mailer');
 const { encrypt, decrypt } = require('../utils/crypto');
 const tgManager = require('../utils/telegramClientManager');
-
-// A wedged MTProto connection can leave a call pending forever with no error — timing
-// it out turns that into a normal failure instead of hanging the request.
-function withTimeout(promise, ms, label) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
+const { rateLimit } = require('../utils/rateLimit');
 
 // ─── JWT helpers ────────────────────────────────────────────────────────────
 
@@ -36,36 +27,28 @@ function verifyToken(token) { return jwt.verify(token, getJwtSecret()); }
 
 const tempLogins = new Map();
 
+// The ONLY way a temp login should ever be torn down. Each entry owns a 20s keepalive
+// interval, and deleting the map entry does not stop it — a missed clearInterval leaves
+// that loop pinging Telegram every 20 seconds, forever, on an already-disconnected
+// client, with one more leaked loop per OTP request. Enough of those from a single IP
+// on dead auth keys reads as abuse and gets the account's sessions terminated.
+async function destroyTempLogin(phoneNumber) {
+    const data = tempLogins.get(phoneNumber);
+    if (!data) return;
+    tempLogins.delete(phoneNumber);
+    clearInterval(data.keepalive);
+    try { await data.client.disconnect(); } catch (_) { }
+}
+
 setInterval(async () => {
     const now = Date.now();
     for (const [phone, data] of tempLogins) {
         if (now > data.expiresAt) {
-            try { await data.client.disconnect(); } catch (_) { }
-            tempLogins.delete(phone);
+            await destroyTempLogin(phone);
             console.log(`🧹 Cleaned up expired OTP session for ${phone}`);
         }
     }
 }, 60 * 1000);
-
-// ─── Rate limiter ────────────────────────────────────────────────────────────
-
-const rateLimitStore = new Map();
-function rateLimit(maxReq, windowMs) {
-    return (req, res, next) => {
-        const key = req.ip;
-        const now = Date.now();
-        const entry = rateLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
-        if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + windowMs; }
-        entry.count++;
-        rateLimitStore.set(key, entry);
-        if (entry.count > maxReq) return res.status(429).json({ error: 'Too many requests. Try again later.' });
-        next();
-    };
-}
-setInterval(() => {
-    const now = Date.now();
-    for (const [k, v] of rateLimitStore) if (now > v.resetAt) rateLimitStore.delete(k);
-}, 5 * 60 * 1000);
 
 // ─── Auth middleware ─────────────────────────────────────────────────────────
 
@@ -98,11 +81,8 @@ router.post('/send-code', rateLimit(5, 60 * 1000), async (req, res) => {
         if (!phoneNumber) return res.status(400).json({ error: 'Phone number required' });
         if (!apiId || !apiHash) return res.status(400).json({ error: 'API ID and API Hash required' });
 
-        // Disconnect any existing session for this phone
-        if (tempLogins.has(phoneNumber)) {
-            try { await tempLogins.get(phoneNumber).client.disconnect(); } catch (_) { }
-            tempLogins.delete(phoneNumber);
-        }
+        // Tear down any existing session for this phone (keepalive included)
+        await destroyTempLogin(phoneNumber);
 
         console.log(`📱 Sending OTP to ${phoneNumber}`);
 
@@ -153,8 +133,7 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
         const tempData = tempLogins.get(phoneNumber);
         if (!tempData) return res.status(400).json({ error: 'Session expired. Request a new code.' });
         if (Date.now() > tempData.expiresAt) {
-            try { await tempData.client.disconnect(); } catch (_) { }
-            tempLogins.delete(phoneNumber);
+            await destroyTempLogin(phoneNumber);
             return res.status(400).json({ error: 'Code expired. Request a new one.' });
         }
 
@@ -237,14 +216,17 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
                     }
                 }
             } catch (err) {
-                await tempData.client.disconnect();
-                tempLogins.delete(phoneNumber);
+                // The Telegram authorization itself succeeded — only the channel the
+                // user picked is unusable. Report that, but note the session created
+                // here is deliberately abandoned; see the persistence note below.
+                await destroyTempLogin(phoneNumber);
                 return res.status(400).json({ error: `Cannot access channel: ${err.message}` });
             }
         }
 
-        await tempData.client.disconnect();
-        tempLogins.delete(phoneNumber);
+        // Never let cleanup failure cost us the session we just authorized — a throw
+        // here would skip the DB save below and orphan it on Telegram's side.
+        await destroyTempLogin(phoneNumber);
 
         // ── Step 3: Save to DB ────────────────────────────────────────────
         const telegramId = me.id.toString();
@@ -298,18 +280,16 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
             if (!isChannel) continue;
 
             channels.push({ id: chat.id, title: chat.title, username: chat.username });
+        }
 
-            const [existing] = await pool.execute(
-                'SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?',
-                [userId, chat.id.toString()]
+        // One batched insert instead of a SELECT + INSERT per dialog — the unique
+        // (user_id, channel_id) index makes IGNORE the existence check for us.
+        if (channels.length > 0) {
+            const rows = channels.map((c) => [uuidv4(), userId, c.id.toString(), c.username, c.title]);
+            await pool.query(
+                `INSERT IGNORE INTO user_channels (id, user_id, channel_id, channel_username, channel_title) VALUES ?`,
+                [rows]
             );
-            if (existing.length === 0) {
-                await pool.execute(
-                    `INSERT INTO user_channels (id, user_id, channel_id, channel_username, channel_title, access_hash)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                    [uuidv4(), userId, chat.id.toString(), chat.username, chat.title, null]
-                );
-            }
         }
 
         await userClient.disconnect();
@@ -340,11 +320,7 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
 
     } catch (err) {
         console.error('Verify error:', err.message);
-        const tempData = tempLogins.get(req.body.phoneNumber);
-        if (tempData?.client) {
-            try { await tempData.client.disconnect(); } catch (_) { }
-            tempLogins.delete(req.body.phoneNumber);
-        }
+        await destroyTempLogin(req.body.phoneNumber);
         // Clean up session file on error too
         try {
             const fs = require('fs');
@@ -415,34 +391,8 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
 
         const token = signToken({ userId: user.id, phoneNumber: user.phone_number, defaultGroupId: user.default_group_id });
 
-        // Every login double-checks the stored Telegram session still works. Telegram
-        // doesn't invalidate it just because the 2FA password changed — but it does if
-        // the user revoked/terminated it on Telegram's side, which commonly happens
-        // right around a password change. A dead session would otherwise fail silently
-        // on the next upload/download; catching it here sends the user to reconnect
-        // immediately instead. Only a definitive "this session is dead" error counts —
-        // a transient timeout on a flaky connection must not force a needless reconnect.
-        // Deliberately not routed through acquireDownloadSlot: that queue exists to
-        // stop raw file-part requests from interleaving on one connection, which a
-        // plain getMe() call never touches — and login must never be able to hang
-        // waiting on a queue slot the way a wedged download/view already could before
-        // that was fixed elsewhere.
-        let telegramReconnectRequired = false;
-        try {
-            const client = await withTimeout(tgManager.getClient(user), 15000, 'telegram health check connect');
-            await withTimeout(client.getMe(), 10000, 'telegram health check getMe');
-        } catch (healthErr) {
-            if (/AUTH_KEY_UNREGISTERED|AUTH_KEY_INVALID|SESSION_REVOKED|USER_DEACTIVATED/.test(healthErr.message)) {
-                console.warn(`⚠️ Telegram session dead for user ${user.id}: ${healthErr.message}`);
-                telegramReconnectRequired = true;
-            } else {
-                console.warn(`Telegram health check inconclusive for user ${user.id} (treating as OK): ${healthErr.message}`);
-            }
-        }
-
         res.json({
             success: true, token,
-            telegramReconnectRequired,
             user: {
                 id: user.id, email: user.email, phoneNumber: user.phone_number,
                 username: user.username, firstName: user.first_name, lastName: user.last_name,
@@ -586,10 +536,16 @@ router.post('/reconnect-verify', authenticate, rateLimit(10, 60 * 1000), async (
         }
 
         const sessionString = await session.client.exportSession();
-        await session.client.disconnect();
-        reconnectSessions.delete(user.id);
 
+        // Persist BEFORE anything else that can fail. An authorization that succeeded
+        // but never got saved is orphaned: it stays alive on Telegram (visible in
+        // Settings > Devices, consuming a session slot) while the DB keeps serving the
+        // old dead one — which looks exactly like "Telegram says active, app says
+        // revoked". Disconnecting is cleanup and must never cost us the new session.
         await pool.execute('UPDATE users SET telegram_session = ?, last_login = NOW() WHERE id = ?', [sessionString, user.id]);
+
+        try { await session.client.disconnect(); } catch (_) { }
+        reconnectSessions.delete(user.id);
         // The cached client (if any) still holds the dead session — drop it so the
         // next Telegram operation picks up the freshly reconnected one.
         await tgManager.forceReconnect(user.id);

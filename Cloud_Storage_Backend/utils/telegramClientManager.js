@@ -18,11 +18,40 @@ function withTimeout(promise, ms, label) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// Thrown by getClient() when we already know this user's stored session is dead.
+// Routes surface it as `sessionRevoked` so the UI can say "reconnect Telegram"
+// instead of showing a generic failure.
+class SessionRevokedError extends Error {
+    constructor() {
+        super('Telegram session revoked — reconnect required');
+        this.sessionRevoked = true;
+    }
+}
+
 class TelegramClientManager {
     constructor() {
         this.clients = new Map();
         this.downloadQueues = new Map(); // userId -> tail promise of the serialized download queue
         this.pendingConnections = new Map(); // userId -> in-flight getClient() creation promise
+        // userId -> the exact session string Telegram told us is revoked. Storing the
+        // string (rather than a bare flag) makes this self-healing: once the user
+        // reconnects, the DB holds a different string, so the check below stops
+        // matching and normal operation resumes with no explicit reset needed.
+        this.deadSessions = new Map();
+    }
+
+    // A revoked session can never be revived by reconnecting — the auth key itself is
+    // gone. Without this, every request rebuilt a fresh connection from the same dead
+    // session string, which Telegram then stalls rather than rejecting, so each request
+    // burned a full 45s route timeout AND a new connection. Queued thumbnails turned
+    // that into minutes of hanging plus a burst of repeated auth attempts from one IP —
+    // exactly the pattern that gets an account flagged, making the problem stickier.
+    markSessionDead(userId, sessionString) {
+        if (!sessionString) return;
+        if (this.deadSessions.get(userId) === sessionString) return;
+        this.deadSessions.set(userId, sessionString);
+        console.warn(`🚫 Marking Telegram session dead for user ${userId} — further requests fail fast until reconnect`);
+        this.forceReconnect(userId);
     }
 
     // Telegram file downloads for one user share a single MTProto connection.
@@ -56,6 +85,14 @@ class TelegramClientManager {
 
     async getClient(user) {
         const userId = user.id;
+
+        // Fail fast on a session we already know is revoked, rather than opening yet
+        // another connection that Telegram will just stall. Matching on the session
+        // string means a reconnect (which writes a new one to the DB) clears this by
+        // itself.
+        if (this.deadSessions.get(userId) === user.telegram_session) {
+            throw new SessionRevokedError();
+        }
 
         // Return cached client if available
         if (this.clients.has(userId)) {

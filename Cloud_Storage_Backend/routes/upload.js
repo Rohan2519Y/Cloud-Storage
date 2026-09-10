@@ -7,9 +7,17 @@ const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const pool = require('../utils/database');
 const tgManager = require('../utils/telegramClientManager');
+const { withTimeout } = require('../utils/withTimeout');
+const { rateLimit } = require('../utils/rateLimit');
 
 const uploadProgressMap = new Map();
 const uploadCancelMap = new Map();
+
+// Telegram sessions don't die from the 2FA password changing, but they do from the
+// user revoking/terminating them on Telegram's own side — which often happens right
+// around a password change. Flagging it lets the frontend send the user to
+// /reconnect-telegram instead of just showing a generic failure forever.
+const DEAD_SESSION_PATTERN = /AUTH_KEY_UNREGISTERED|AUTH_KEY_INVALID|SESSION_REVOKED|USER_DEACTIVATED/;
 
 // ─── Auth middleware ─────────────────────────────────────────────────────────
 
@@ -52,37 +60,6 @@ async function authenticateDownload(req, res, next) {
         res.status(401).json({ error: 'Invalid or expired download link' });
     }
 }
-
-// A wedged MTProto connection can leave a call pending forever with no error — timing
-// it out turns that into a normal failure so the per-user download queue keeps moving.
-function withTimeout(promise, ms, label) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-// ─── Rate limiter ─────────────────────────────────────────────────────────────
-
-const rateLimitMap = new Map();
-function rateLimit(maxRequests, windowMs) {
-    return (req, res, next) => {
-        const key = req.ip;
-        const now = Date.now();
-        const entry = rateLimitMap.get(key) || { count: 0, resetAt: now + windowMs };
-        if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + windowMs; }
-        entry.count++;
-        rateLimitMap.set(key, entry);
-        if (entry.count > maxRequests) return res.status(429).json({ error: 'Too many requests. Please slow down.' });
-        next();
-    };
-}
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [k, v] of rateLimitMap) if (now > v.resetAt) rateLimitMap.delete(k);
-}, 5 * 60 * 1000);
 
 let activeUploads = 0;
 const MAX_CONCURRENT_UPLOADS = 3;
@@ -395,7 +372,7 @@ router.get('/download-ticket/:messageId', authenticateUser, async (req, res) => 
 
 // ─── DOWNLOAD ────────────────────────────────────────────────────────────────
 
-router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000), async (req, res) => {
+router.get('/download/:messageId', authenticateDownload, rateLimit(60, 60 * 1000), async (req, res) => {
     // Set once this request has acquired the client and its download-queue slot,
     // so the catch block below only tears down what this request actually holds.
     let tgOperationStarted = false;
@@ -409,6 +386,11 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000
     // it, wedging every request queued behind it. This flag lets setup() notice
     // it's been abandoned and release the slot itself instead of leaking it.
     let abandoned = false;
+    // Same idea if the client disconnects while setup() is still waiting its turn in
+    // the queue — no point burning a Telegram round trip finishing setup for a
+    // response nobody will receive. (The streaming phase below has its own
+    // abortController for cancelling mid-transfer once setup has already succeeded.)
+    req.on('close', () => { abandoned = true; });
     const releaseTgOperation = () => {
         if (!tgOperationStarted) return;
         tgOperationStarted = false;
@@ -576,19 +558,26 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(20, 60 * 1000
     } catch (err) {
         abandoned = true;
         console.error('Download error:', err.message);
-        // Any failure once we'd already reached the Telegram client (not just ones
-        // whose message happens to say "timed out") is grounds for suspicion that the
-        // connection itself is wedged — reconnect so the next request gets a fresh one
-        // instead of piling up behind the same broken client.
-        if (tgOperationStarted) tgManager.forceReconnect(req.user.id);
+        const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
+        if (sessionRevoked) {
+            // Reconnecting can't fix a revoked auth key — mark it so every later
+            // request fails instantly instead of rebuilding a doomed connection.
+            tgManager.markSessionDead(req.user.id, req.user.telegram_session);
+        } else if (tgOperationStarted) {
+            // Any other failure once we'd already reached the Telegram client (not just
+            // ones whose message happens to say "timed out") is grounds for suspicion
+            // that the connection itself is wedged — reconnect so the next request gets
+            // a fresh one instead of piling up behind the same broken client.
+            tgManager.forceReconnect(req.user.id);
+        }
         releaseTgOperation();
-        if (!res.headersSent) res.status(500).json({ error: err.message });
+        if (!res.headersSent) res.status(500).json({ error: err.message, sessionRevoked });
     }
 });
 
 // ─── VIEW ─────────────────────────────────────────────────────────────────────
 
-router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async (req, res) => {
+router.get('/view/:messageId', authenticateUser, rateLimit(60, 60 * 1000), async (req, res) => {
     // Thumbnails also pull raw file data over the shared Telegram connection, so they
     // must go through the same per-user queue as /download or they can interleave with
     // an in-progress download and trigger the same session-reset problem.
@@ -599,6 +588,12 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
     // acquireDownloadSlot at that moment it would otherwise acquire and never
     // release the slot, wedging every request queued behind it for this user.
     let abandoned = false;
+    // A folder view can queue up a dozen thumbnail requests at once; if the user
+    // navigates away while several are still waiting their turn, the browser aborts
+    // the connection but this handler would otherwise keep running to completion for
+    // nobody — burning a real Telegram round trip and holding up whatever's still
+    // queued behind it. Reuses the same `abandoned` checkpoint above.
+    req.on('close', () => { abandoned = true; });
     const releaseTgOperation = () => {
         if (!tgOperationStarted) return;
         tgOperationStarted = false;
@@ -657,10 +652,15 @@ router.get('/view/:messageId', authenticateUser, rateLimit(20, 60 * 1000), async
     } catch (err) {
         abandoned = true;
         console.error('View error:', err.message);
-        // See the matching comment in /download: reconnect on any failure once we'd
-        // already reached the Telegram client, not just ones matching "timed out".
-        if (tgOperationStarted) tgManager.forceReconnect(req.user.id);
-        if (!res.headersSent) res.status(500).json({ error: err.message });
+        // See the matching comments in /download: a revoked session is marked dead so
+        // later requests fail instantly; anything else just gets a fresh connection.
+        const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
+        if (sessionRevoked) {
+            tgManager.markSessionDead(req.user.id, req.user.telegram_session);
+        } else if (tgOperationStarted) {
+            tgManager.forceReconnect(req.user.id);
+        }
+        if (!res.headersSent) res.status(500).json({ error: err.message, sessionRevoked });
     } finally {
         releaseTgOperation();
     }
@@ -833,18 +833,17 @@ router.post('/sync-channels', authenticateUser, async (req, res) => {
 
             const username = peer.username || null;
             channels.push({ id, title, username });
+        }
 
-            const [existing] = await pool.execute(
-                'SELECT id FROM user_channels WHERE user_id = ? AND channel_id = ?',
-                [user.id, id]
+        // One batched insert instead of a SELECT + INSERT per dialog (up to 500
+        // dialogs = up to 1000 round trips otherwise) — the unique (user_id,
+        // channel_id) index makes IGNORE the existence check for us.
+        if (channels.length > 0) {
+            const rows = channels.map((c) => [uuidv4(), user.id, c.id, c.username, c.title]);
+            await pool.query(
+                `INSERT IGNORE INTO user_channels (id, user_id, channel_id, channel_username, channel_title) VALUES ?`,
+                [rows]
             );
-            if (existing.length === 0) {
-                await pool.execute(
-                    `INSERT INTO user_channels (id, user_id, channel_id, channel_username, channel_title, access_hash)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                    [uuidv4(), user.id, id, username, title, null]
-                );
-            }
         }
 
         res.json({ success: true, synced: channels.length, channels });
