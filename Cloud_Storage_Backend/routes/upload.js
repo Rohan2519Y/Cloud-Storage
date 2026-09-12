@@ -145,6 +145,10 @@ router.post('/upload',
         // in-progress upload can't interleave its requests with a concurrent
         // download/view on the same shared connection.
         let releaseDownloadSlot = null;
+        // Only true once getClient() actually returned a client — mirrors /download
+        // and /view, so a failure before ever reaching Telegram (bad request body, DB
+        // error, etc.) doesn't needlessly force-reconnect a perfectly fine client.
+        let tgOperationStarted = false;
 
         try {
             const channelId = req.query.channelId || user.default_group_id;
@@ -184,6 +188,7 @@ router.post('/upload',
                         if (uploadId) uploadProgressMap.set(uploadId, 3);
 
                         const client = await tgManager.getClient(user);
+                        tgOperationStarted = true;
                         tgManager.pauseTimer(user.id);
                         releaseDownloadSlot = await tgManager.acquireDownloadSlot(user.id);
 
@@ -296,7 +301,17 @@ router.post('/upload',
                 if (!res.headersSent) res.status(499).json({ error: 'Upload cancelled' });
             } else {
                 console.error('Upload error:', err.message);
-                if (!res.headersSent) res.status(500).json({ error: err.message });
+                // See the matching comments on /download and /view: a revoked session
+                // must be marked dead here too, or every retried upload keeps rebuilding
+                // a connection from the same dead auth key — the exact hammering pattern
+                // that gets an account's sessions (including other devices) terminated.
+                const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
+                if (sessionRevoked) {
+                    tgManager.markSessionDead(user.id, user.telegram_session);
+                } else if (tgOperationStarted) {
+                    tgManager.forceReconnect(user.id);
+                }
+                if (!res.headersSent) res.status(500).json({ error: err.message, sessionRevoked });
             }
 
             if (req.query.uploadId) {
@@ -735,6 +750,13 @@ router.delete('/files/:id', authenticateUser, async (req, res) => {
                 }
             } catch (tgErr) {
                 console.error('Telegram delete error:', tgErr.message);
+                // Bulk deletes fire one request per file — without this, deleting many
+                // files after the session died means each one retries a fresh connection
+                // on the same dead auth key, the exact repeated-failed-auth pattern that
+                // gets Telegram to terminate every session on the account, phone included.
+                if (tgErr.sessionRevoked || DEAD_SESSION_PATTERN.test(tgErr.message)) {
+                    tgManager.markSessionDead(req.user.id, req.user.telegram_session);
+                }
             }
         }
 
@@ -805,9 +827,11 @@ router.post('/sync-channels', authenticateUser, async (req, res) => {
     // per-user Telegram connection with an in-progress download/view without going
     // through the same queue lets their requests interleave and stall each other.
     let releaseDownloadSlot = null;
+    let tgOperationStarted = false;
     try {
         const user = req.user;
         const client = await tgManager.getClient(user);
+        tgOperationStarted = true;
         tgManager.pauseTimer(user.id);
         releaseDownloadSlot = await tgManager.acquireDownloadSlot(user.id);
 
@@ -848,7 +872,18 @@ router.post('/sync-channels', authenticateUser, async (req, res) => {
 
         res.json({ success: true, synced: channels.length, channels });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Sync-channels error:', err.message);
+        // Same reasoning as /download, /view and /upload: a revoked session must be
+        // marked dead so a channel sync retry doesn't keep reconnecting with the same
+        // dead auth key — repeated failed auth attempts are what gets Telegram to
+        // terminate every session on the account, phone included.
+        const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
+        if (sessionRevoked) {
+            tgManager.markSessionDead(req.user.id, req.user.telegram_session);
+        } else if (tgOperationStarted) {
+            tgManager.forceReconnect(req.user.id);
+        }
+        res.status(500).json({ error: err.message, sessionRevoked });
     } finally {
         tgManager.resumeTimer(req.user.id);
         releaseDownloadSlot?.();
