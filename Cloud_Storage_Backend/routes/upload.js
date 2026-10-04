@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const busboy = require('busboy');
 const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const { InputMedia, Thumbnail } = require('@mtcute/node');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
@@ -62,7 +63,7 @@ async function authenticateDownload(req, res, next) {
 }
 
 let activeUploads = 0;
-const MAX_CONCURRENT_UPLOADS = 3;
+const MAX_CONCURRENT_UPLOADS = 2;
 
 // ─── HEALTH ──────────────────────────────────────────────────────────────────
 
@@ -156,7 +157,6 @@ router.post('/upload',
             const folderId = req.query.folderId || null;
 
             if (!channelId) {
-                activeUploads--;
                 return res.status(400).json({ error: 'No channel specified' });
             }
 
@@ -598,8 +598,10 @@ router.get('/view/:messageId', authenticateUser, rateLimit(60, 60 * 1000), async
     // an in-progress download and trigger the same session-reset problem.
     let tgOperationStarted = false;
     let releaseDownloadSlot = null;
+    let inactivityTimer = null;
+    let abortController = null;
     // See the matching comment in /download above: once the outer withTimeout gives
-    // up, run() keeps executing in the background, and if it was still waiting for
+    // up, setup() keeps executing in the background, and if it was still waiting for
     // acquireDownloadSlot at that moment it would otherwise acquire and never
     // release the slot, wedging every request queued behind it for this user.
     let abandoned = false;
@@ -608,24 +610,30 @@ router.get('/view/:messageId', authenticateUser, rateLimit(60, 60 * 1000), async
     // the connection but this handler would otherwise keep running to completion for
     // nobody — burning a real Telegram round trip and holding up whatever's still
     // queued behind it. Reuses the same `abandoned` checkpoint above.
-    req.on('close', () => { abandoned = true; });
+    req.once('aborted', () => {
+        abandoned = true;
+        abortController?.abort();
+    });
     const releaseTgOperation = () => {
-        if (!tgOperationStarted) return;
+        const timerWasPaused = tgOperationStarted;
         tgOperationStarted = false;
-        tgManager.resumeTimer(req.user.id);
+        if (timerWasPaused) tgManager.resumeTimer(req.user.id);
+        // Always release a slot if one arrived late after the outer setup timeout.
+        // In that case the earlier cleanup already reset tgOperationStarted, but the
+        // queued acquire can still resolve afterward and must not remain locked.
         releaseDownloadSlot?.();
         releaseDownloadSlot = null;
     };
 
-    // Wrapping the whole body (not just individual calls) means the request can never
-    // hang past this no matter which step turns out to be the stuck one — including
-    // ones with no timeout of their own, like pool.execute or acquireDownloadSlot's wait.
-    const run = async () => {
+    // Setup has an overall timeout so DB lookup, Telegram connection, queue waiting,
+    // and message resolution cannot hang forever. The stream itself instead uses an
+    // inactivity timeout, allowing large files to take longer while bytes keep moving.
+    const setup = async () => {
         const [fileRecords] = await pool.execute(
             'SELECT * FROM uploaded_files WHERE telegram_message_id = ? AND user_id = ?',
             [req.params.messageId, req.user.id]
         );
-        if (fileRecords.length === 0) return res.status(404).json({ error: 'File not found' });
+        if (fileRecords.length === 0) return { notFound: true, message: 'File not found' };
 
         const fileRecord = fileRecords[0];
         const client = await tgManager.getClient(req.user);
@@ -643,7 +651,7 @@ router.get('/view/:messageId', authenticateUser, rateLimit(60, 60 * 1000), async
 
         const message = Array.isArray(messages) ? messages[0] : messages;
         if (!message || !message.media)
-            return res.status(404).json({ error: 'File not found on Telegram' });
+            return { notFound: true, message: 'File not found on Telegram' };
 
         // Grid thumbnails only need Telegram's small pre-generated preview (a few KB),
         // not the full original file. Downloading the whole thing just to render a
@@ -654,29 +662,75 @@ router.get('/view/:messageId', authenticateUser, rateLimit(60, 60 * 1000), async
             ? (message.media.getThumbnail?.(Thumbnail.THUMB_320x320_BOX) || message.media.thumbnails?.[0])
             : null;
         const mediaToFetch = thumb || message.media;
+        const reportedMediaSize = thumb
+            ? (thumb.fileSize || thumb.size || undefined)
+            : (fileRecord.file_size || message.media.fileSize || undefined);
+        const mediaSize = Number.isFinite(Number(reportedMediaSize)) && Number(reportedMediaSize) > 0
+            ? Number(reportedMediaSize)
+            : undefined;
 
-        const fileBuffer = await client.downloadAsBuffer(mediaToFetch);
-        res.setHeader('Content-Type', thumb ? 'image/jpeg' : (fileRecord.mime_type || 'application/octet-stream'));
-        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileRecord.original_name)}"`);
-        res.setHeader('Content-Length', fileBuffer.length);
-        res.send(Buffer.from(fileBuffer));
+        return { client, fileRecord, mediaToFetch, mediaSize, isThumbnail: Boolean(thumb) };
     };
 
     try {
-        await withTimeout(run(), 45000, 'view request');
+        // Time out only the setup phase. Once bytes start flowing, large previews are
+        // governed by the inactivity watchdog instead of an arbitrary total duration.
+        const result = await withTimeout(setup(), 45000, 'view setup');
+        if (result.notFound) {
+            return res.status(404).json({ error: result.message });
+        }
+        if (abandoned) {
+            throw new Error('view request abandoned during setup');
+        }
+
+        const { client, fileRecord, mediaToFetch, mediaSize, isThumbnail } = result;
+        abortController = new AbortController();
+
+        const tgStream = client.downloadAsNodeStream(mediaToFetch, {
+            fileSize: mediaSize,
+            partSize: mediaSize && mediaSize > 5 * 1024 * 1024 ? 512 : undefined,
+            abortSignal: abortController.signal,
+        });
+
+        res.setHeader('Content-Type', isThumbnail ? 'image/jpeg' : (fileRecord.mime_type || 'application/octet-stream'));
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(fileRecord.original_name)}"`);
+        if (mediaSize) res.setHeader('Content-Length', mediaSize);
+
+        const INACTIVITY_TIMEOUT = 30000;
+        const resetInactivityTimer = () => {
+            clearTimeout(inactivityTimer);
+            inactivityTimer = setTimeout(() => {
+                tgStream.destroy(new Error(`View stalled — no data for ${INACTIVITY_TIMEOUT / 1000}s`));
+            }, INACTIVITY_TIMEOUT);
+        };
+        resetInactivityTimer();
+        tgStream.on('data', resetInactivityTimer);
+
+        // Awaiting pipeline keeps the Telegram client and per-user queue slot reserved
+        // until the response has actually finished, while applying stream backpressure.
+        await pipeline(tgStream, res);
     } catch (err) {
         abandoned = true;
         console.error('View error:', err.message);
+        const clientDisconnected = req.aborted
+            || err.code === 'ERR_STREAM_PREMATURE_CLOSE'
+            || (err.name === 'AbortError' && abortController?.signal.aborted);
         // See the matching comments in /download: a revoked session is marked dead so
         // later requests fail instantly; anything else just gets a fresh connection.
         const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
         if (sessionRevoked) {
             tgManager.markSessionDead(req.user.id, req.user.telegram_session);
-        } else if (tgOperationStarted) {
+        } else if (tgOperationStarted && !clientDisconnected) {
             tgManager.forceReconnect(req.user.id);
         }
-        if (!res.headersSent) res.status(500).json({ error: err.message, sessionRevoked });
+        if (!res.headersSent && !clientDisconnected) {
+            res.status(500).json({ error: err.message, sessionRevoked });
+        } else if (!clientDisconnected && !res.destroyed) {
+            res.destroy(err);
+        }
     } finally {
+        clearTimeout(inactivityTimer);
+        abortController?.abort();
         releaseTgOperation();
     }
 });

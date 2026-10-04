@@ -86,7 +86,7 @@ interface UploadQueueItem {
     error?: string
 }
 
-const MAX_CONCURRENT_UPLOADS = 3
+const MAX_CONCURRENT_UPLOADS = 1
 
 export default function FilesPage() {
     const [files, setFiles] = useState<FileItem[]>([])
