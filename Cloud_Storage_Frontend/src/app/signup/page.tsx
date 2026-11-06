@@ -155,7 +155,7 @@ export default function SignupPage() {
   const handleCompleteProfile = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (password !== confirmPassword) { setError('Passwords do not match'); return; }
-    if (password.length < 6) { setError('Password must be at least 6 characters'); return; }
+    if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
     setLoading(true);
     setError('');
     let abort = false;
@@ -364,7 +364,7 @@ export default function SignupPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="new-password"
                 className="w-full px-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-lg text-black dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                placeholder="Minimum 6 characters"
+                placeholder="Minimum 8 characters"
                 required
               />
             </div>

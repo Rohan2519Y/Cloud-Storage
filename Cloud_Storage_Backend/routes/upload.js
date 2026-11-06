@@ -5,14 +5,19 @@ const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { InputMedia, Thumbnail } = require('@mtcute/node');
 const { v4: uuidv4 } = require('uuid');
-const jwt = require('jsonwebtoken');
 const pool = require('../utils/database');
 const tgManager = require('../utils/telegramClientManager');
 const { withTimeout } = require('../utils/withTimeout');
 const { rateLimit } = require('../utils/rateLimit');
+const { authenticate, authenticateDownload, signDownloadTicket } = require('../utils/authMiddleware');
+const { HttpError, sendError, asyncHandler } = require('../utils/httpErrors');
 
+// Upload progress/cancel state is keyed by `${userId}:${uploadId}` so one user can never
+// read or cancel another user's upload by guessing/learning its id.
 const uploadProgressMap = new Map();
 const uploadCancelMap = new Map();
+const UPLOAD_ID_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
+const uploadKey = (userId, uploadId) => `${userId}:${uploadId}`;
 
 // Telegram sessions don't die from the 2FA password changing, but they do from the
 // user revoking/terminating them on Telegram's own side — which often happens right
@@ -20,46 +25,24 @@ const uploadCancelMap = new Map();
 // /reconnect-telegram instead of just showing a generic failure forever.
 const DEAD_SESSION_PATTERN = /AUTH_KEY_UNREGISTERED|AUTH_KEY_INVALID|SESSION_REVOKED|USER_DEACTIVATED/;
 
-// ─── Auth middleware ─────────────────────────────────────────────────────────
+// Auth: one shared implementation (utils/authMiddleware.js).
+//   authenticateUser      → basic user columns (no Telegram secrets loaded)
+//   authenticateTelegram  → plus the decrypted Telegram session + API credentials
+const authenticateUser = authenticate();
+const authenticateTelegram = authenticate({ telegram: true });
+const authenticateDownloadTicket = authenticateDownload();
 
-async function authenticateUser(req, res, next) {
-    try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        if (!token) return res.status(401).json({ error: 'Authentication required' });
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.userId]);
-        if (users.length === 0) return res.status(401).json({ error: 'User not found' });
-        // Reject tokens issued before the password was last reset, so a password
-        // change actually forces a fresh login instead of leaving old sessions valid.
-        const passwordChangedAt = users[0].password_changed_at;
-        if (passwordChangedAt && decoded.iat * 1000 < new Date(passwordChangedAt).getTime()) {
-            return res.status(401).json({ error: 'Password was changed. Please log in again.' });
-        }
-        req.user = users[0];
-        next();
-    } catch (err) {
-        res.status(401).json({ error: 'Invalid token' });
+// Shared failure path for routes that talk to Telegram: a revoked session is marked dead
+// so retries fail fast; any other failure after the client was reached drops the cached
+// (possibly wedged) connection.
+function handleTelegramFailure(user, err, { operationStarted }) {
+    const sessionRevoked = Boolean(err.sessionRevoked) || DEAD_SESSION_PATTERN.test(err.message || '');
+    if (sessionRevoked) {
+        tgManager.markSessionDead(user.id, user.telegram_session);
+    } else if (operationStarted) {
+        tgManager.forceReconnect(user.id);
     }
-}
-
-// Native <a href> downloads can't send an Authorization header, so a short-lived
-// single-file ticket (?dt=) is accepted as an alternate credential on download routes.
-async function authenticateDownload(req, res, next) {
-    const ticket = req.query.dt;
-    if (!ticket) return authenticateUser(req, res, next);
-
-    try {
-        const decoded = jwt.verify(ticket, process.env.JWT_SECRET);
-        if (decoded.purpose !== 'download' || decoded.messageId !== req.params.messageId) {
-            return res.status(401).json({ error: 'Invalid or expired download link' });
-        }
-        const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.userId]);
-        if (users.length === 0) return res.status(401).json({ error: 'User not found' });
-        req.user = users[0];
-        next();
-    } catch (err) {
-        res.status(401).json({ error: 'Invalid or expired download link' });
-    }
+    return sessionRevoked;
 }
 
 let activeUploads = 0;
@@ -79,11 +62,13 @@ router.get('/health', (req, res) => {
 });
 
 // ─── SSE PROGRESS ────────────────────────────────────────────────────────────
+// Authenticated with the normal Authorization header — the browser client reads this
+// stream with fetch() rather than EventSource precisely so the JWT never has to be put
+// in a URL (where it would land in logs and history).
 
-router.get('/upload-progress/:uploadId', async (req, res) => {
-    const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
-    try { jwt.verify(token, process.env.JWT_SECRET); }
-    catch { return res.status(401).end(); }
+router.get('/upload-progress/:uploadId', authenticateUser, (req, res) => {
+    if (!UPLOAD_ID_PATTERN.test(req.params.uploadId)) return res.status(400).json({ error: 'Invalid upload id' });
+    const key = uploadKey(req.user.id, req.params.uploadId);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -91,45 +76,41 @@ router.get('/upload-progress/:uploadId', async (req, res) => {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    const id = req.params.uploadId;
-
-    // Pre-seed map so it's never undefined when interval fires
-    uploadProgressMap.set(id, 0);
-    res.write(`data: ${JSON.stringify({ progress: 0 })}\n\n`);
+    // Pre-seed so it's never undefined when the interval fires — but don't clobber
+    // progress the upload route already recorded before this stream connected.
+    if (!uploadProgressMap.has(key)) uploadProgressMap.set(key, 0);
+    res.write(`data: ${JSON.stringify({ progress: uploadProgressMap.get(key) })}\n\n`);
 
     const interval = setInterval(() => {
-        const progress = uploadProgressMap.get(id) ?? 0;
-        // Always send — no more silent heartbeats swallowing real progress
+        const progress = uploadProgressMap.get(key) ?? 0;
         res.write(`data: ${JSON.stringify({ progress })}\n\n`);
         if (progress >= 100) {
             clearInterval(interval);
-            uploadProgressMap.delete(id);
+            uploadProgressMap.delete(key);
             res.end();
         }
-    }, 150); // tighter than 300ms for smoother UI
+    }, 150);
 
     req.on('close', () => {
         clearInterval(interval);
-        uploadProgressMap.delete(id);
+        uploadProgressMap.delete(key);
     });
 });
 
 // ─── CANCEL ──────────────────────────────────────────────────────────────────
 
-router.post('/upload-cancel/:uploadId', async (req, res) => {
-    const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
-    try { jwt.verify(token, process.env.JWT_SECRET); }
-    catch { return res.status(401).end(); }
-    const id = req.params.uploadId;
-    uploadCancelMap.set(id, true);
-    uploadProgressMap.delete(id);
+router.post('/upload-cancel/:uploadId', authenticateUser, rateLimit(30, 60 * 1000), (req, res) => {
+    if (!UPLOAD_ID_PATTERN.test(req.params.uploadId)) return res.status(400).json({ error: 'Invalid upload id' });
+    const key = uploadKey(req.user.id, req.params.uploadId);
+    uploadCancelMap.set(key, true);
+    uploadProgressMap.delete(key);
     res.json({ success: true });
 });
 
 // ─── UPLOAD ──────────────────────────────────────────────────────────────────
 
 router.post('/upload',
-    authenticateUser,
+    authenticateTelegram,
     rateLimit(10, 60 * 1000),
     async (req, res) => {
 
@@ -150,18 +131,28 @@ router.post('/upload',
         // and /view, so a failure before ever reaching Telegram (bad request body, DB
         // error, etc.) doesn't needlessly force-reconnect a perfectly fine client.
         let tgOperationStarted = false;
+        let progressKey = null;
 
         try {
             const channelId = req.query.channelId || user.default_group_id;
             const uploadId = req.query.uploadId || null;
             const folderId = req.query.folderId || null;
 
-            if (!channelId) {
+            if (!channelId || !/^-?\d{1,20}$/.test(String(channelId))) {
                 return res.status(400).json({ error: 'No channel specified' });
+            }
+            if (uploadId !== null && !UPLOAD_ID_PATTERN.test(uploadId)) {
+                return res.status(400).json({ error: 'Invalid upload id' });
+            }
+            progressKey = uploadId ? uploadKey(user.id, uploadId) : null;
+
+            if (folderId) {
+                const [folders] = await pool.execute('SELECT id FROM folders WHERE id = ? AND user_id = ?', [folderId, user.id]);
+                if (folders.length === 0) return res.status(404).json({ error: 'Target folder not found' });
             }
 
             // FIX: Signal immediately that request reached the server
-            if (uploadId) uploadProgressMap.set(uploadId, 1);
+            if (progressKey) uploadProgressMap.set(progressKey, 1);
 
             const bb = busboy({
                 headers: req.headers,
@@ -185,7 +176,7 @@ router.post('/upload',
 
                     try {
                         // FIX: 3% as soon as busboy fires the file event
-                        if (uploadId) uploadProgressMap.set(uploadId, 3);
+                        if (progressKey) uploadProgressMap.set(progressKey, 3);
 
                         const client = await tgManager.getClient(user);
                         tgOperationStarted = true;
@@ -204,7 +195,7 @@ router.post('/upload',
                         });
 
                         fileStream.on('data', (chunk) => {
-                            if (uploadCancelMap.get(uploadId)) {
+                            if (uploadCancelMap.get(progressKey)) {
                                 fileStream.destroy();
                                 trackingStream.destroy();
                                 return;
@@ -223,7 +214,7 @@ router.post('/upload',
                             // Gives more headroom for the Telegram phase to feel smooth
                             if (estimatedFileSize > 0) {
                                 const p = Math.min(3 + Math.round((received / estimatedFileSize) * 27), 30);
-                                if (uploadId) uploadProgressMap.set(uploadId, p);
+                                if (progressKey) uploadProgressMap.set(progressKey, p);
                             }
                         });
 
@@ -232,11 +223,11 @@ router.post('/upload',
                             fileSize = received;
                             // FIX: Explicitly land at 30% when receive is done
                             // so the UI doesn't stall while Telegram upload begins
-                            if (uploadId) uploadProgressMap.set(uploadId, 30);
+                            if (progressKey) uploadProgressMap.set(progressKey, 30);
                         });
 
                         fileStream.on('error', (err) => trackingStream.destroy(err));
-                        fileStream.on('limit', () => reject(new Error('File exceeds 2GB limit')));
+                        fileStream.on('limit', () => reject(new HttpError(413, 'File exceeds 2GB limit')));
 
                         const uploadedFile = await client.uploadFile({
                             file: trackingStream,
@@ -244,14 +235,14 @@ router.post('/upload',
                             fileSize: estimatedFileSize || undefined,
                             fileMime: mimeType,
                             progressCallback: (uploaded, total) => {
-                                if (uploadCancelMap.get(uploadId)) {
+                                if (uploadCancelMap.get(progressKey)) {
                                     throw new Error('UPLOAD_CANCELLED');
                                 }
                                 // FIX: Telegram phase = 30–99%
                                 const p = total > 0
                                     ? Math.round(30 + (uploaded / total) * 69)
                                     : Math.min(Math.round(30 + (uploaded / (estimatedFileSize || uploaded)) * 69), 99);
-                                if (uploadId) uploadProgressMap.set(uploadId, Math.min(p, 99));
+                                if (progressKey) uploadProgressMap.set(progressKey, Math.min(p, 99));
                                 process.stdout.write(`\r📤 Telegram: ${total > 0 ? Math.round(uploaded / total * 100) : '?'}%`);
                             },
                         });
@@ -264,7 +255,7 @@ router.post('/upload',
                         }));
 
                         console.log(`✅ Done — message ID ${result.id}`);
-                        if (uploadId) uploadProgressMap.set(uploadId, 100);
+                        if (progressKey) uploadProgressMap.set(progressKey, 100);
                         resolve(result);
 
                     } catch (err) { reject(err); }
@@ -272,7 +263,7 @@ router.post('/upload',
 
                 bb.on('error', reject);
                 bb.on('finish', () => {
-                    if (!fileName) reject(new Error('No file field in request'));
+                    if (!fileName) reject(new HttpError(400, 'No file field in request'));
                 });
             });
 
@@ -294,29 +285,26 @@ router.post('/upload',
             });
 
         } catch (err) {
-            const wasCancelled = err.message === 'UPLOAD_CANCELLED' || uploadCancelMap.get(req.query.uploadId);
+            const wasCancelled = err.message === 'UPLOAD_CANCELLED' || (progressKey && uploadCancelMap.get(progressKey));
 
             if (wasCancelled) {
                 console.log(`🚫 Upload cancelled: ${req.query.uploadId}`);
                 if (!res.headersSent) res.status(499).json({ error: 'Upload cancelled' });
             } else {
-                console.error('Upload error:', err.message);
                 // See the matching comments on /download and /view: a revoked session
                 // must be marked dead here too, or every retried upload keeps rebuilding
                 // a connection from the same dead auth key — the exact hammering pattern
                 // that gets an account's sessions (including other devices) terminated.
-                const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
-                if (sessionRevoked) {
-                    tgManager.markSessionDead(user.id, user.telegram_session);
-                } else if (tgOperationStarted) {
-                    tgManager.forceReconnect(user.id);
-                }
-                if (!res.headersSent) res.status(500).json({ error: err.message, sessionRevoked });
+                const sessionRevoked = handleTelegramFailure(user, err, { operationStarted: tgOperationStarted });
+                sendError(res, err, 'Upload error', {
+                    sessionRevoked,
+                    ...(sessionRevoked ? { error: 'Telegram session expired — reconnect required' } : {}),
+                });
             }
 
-            if (req.query.uploadId) {
-                uploadProgressMap.delete(req.query.uploadId);
-                uploadCancelMap.delete(req.query.uploadId);
+            if (progressKey) {
+                uploadProgressMap.delete(progressKey);
+                uploadCancelMap.delete(progressKey);
             }
 
         } finally {
@@ -346,7 +334,7 @@ router.get('/files', authenticateUser, async (req, res) => {
         const [files] = await pool.execute(query, params);
         res.json({ success: true, count: files.length, files });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
@@ -358,7 +346,7 @@ router.get('/files/:id', authenticateUser, async (req, res) => {
         if (files.length === 0) return res.status(404).json({ error: 'File not found' });
         res.json({ success: true, file: files[0] });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
@@ -374,20 +362,15 @@ router.get('/download-ticket/:messageId', authenticateUser, async (req, res) => 
         );
         if (fileRecords.length === 0) return res.status(404).json({ error: 'File not found' });
 
-        const token = jwt.sign(
-            { userId: req.user.id, messageId: req.params.messageId, purpose: 'download' },
-            process.env.JWT_SECRET,
-            { expiresIn: '2m' }
-        );
-        res.json({ token });
+        res.json({ token: signDownloadTicket(req.user.id, req.params.messageId) });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
 // ─── DOWNLOAD ────────────────────────────────────────────────────────────────
 
-router.get('/download/:messageId', authenticateDownload, rateLimit(60, 60 * 1000), async (req, res) => {
+router.get('/download/:messageId', authenticateDownloadTicket, rateLimit(60, 60 * 1000), async (req, res) => {
     // Set once this request has acquired the client and its download-queue slot,
     // so the catch block below only tears down what this request actually holds.
     let tgOperationStarted = false;
@@ -550,7 +533,7 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(60, 60 * 1000
             console.error('Download stream error:', err.message);
             clearTimeout(inactivityTimer);
             tgManager.forceReconnect(req.user.id);
-            if (!res.headersSent) res.status(500).json({ error: err.message });
+            if (!res.headersSent) res.status(500).json({ error: 'Download failed' });
             res.destroy(err);
         });
 
@@ -572,27 +555,21 @@ router.get('/download/:messageId', authenticateDownload, rateLimit(60, 60 * 1000
         }
     } catch (err) {
         abandoned = true;
-        console.error('Download error:', err.message);
-        const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
-        if (sessionRevoked) {
-            // Reconnecting can't fix a revoked auth key — mark it so every later
-            // request fails instantly instead of rebuilding a doomed connection.
-            tgManager.markSessionDead(req.user.id, req.user.telegram_session);
-        } else if (tgOperationStarted) {
-            // Any other failure once we'd already reached the Telegram client (not just
-            // ones whose message happens to say "timed out") is grounds for suspicion
-            // that the connection itself is wedged — reconnect so the next request gets
-            // a fresh one instead of piling up behind the same broken client.
-            tgManager.forceReconnect(req.user.id);
-        }
+        // A revoked session can't be fixed by reconnecting — it's marked dead so every
+        // later request fails instantly. Any other failure once we'd reached the Telegram
+        // client suggests the connection itself is wedged, so it's dropped and the next
+        // request gets a fresh one instead of piling up behind the same broken client.
+        const sessionRevoked = handleTelegramFailure(req.user, err, { operationStarted: tgOperationStarted });
         releaseTgOperation();
-        if (!res.headersSent) res.status(500).json({ error: err.message, sessionRevoked });
+        sendError(res, err, 'Download error', sessionRevoked
+            ? { sessionRevoked, error: 'Telegram session expired — reconnect required' }
+            : { sessionRevoked });
     }
 });
 
 // ─── VIEW ─────────────────────────────────────────────────────────────────────
 
-router.get('/view/:messageId', authenticateUser, rateLimit(60, 60 * 1000), async (req, res) => {
+router.get('/view/:messageId', authenticateTelegram, rateLimit(60, 60 * 1000), async (req, res) => {
     // Thumbnails also pull raw file data over the shared Telegram connection, so they
     // must go through the same per-user queue as /download or they can interleave with
     // an in-progress download and trigger the same session-reset problem.
@@ -717,14 +694,11 @@ router.get('/view/:messageId', authenticateUser, rateLimit(60, 60 * 1000), async
             || (err.name === 'AbortError' && abortController?.signal.aborted);
         // See the matching comments in /download: a revoked session is marked dead so
         // later requests fail instantly; anything else just gets a fresh connection.
-        const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
-        if (sessionRevoked) {
-            tgManager.markSessionDead(req.user.id, req.user.telegram_session);
-        } else if (tgOperationStarted && !clientDisconnected) {
-            tgManager.forceReconnect(req.user.id);
-        }
+        const sessionRevoked = handleTelegramFailure(req.user, err, { operationStarted: tgOperationStarted && !clientDisconnected });
         if (!res.headersSent && !clientDisconnected) {
-            res.status(500).json({ error: err.message, sessionRevoked });
+            sendError(res, err, 'View error (response)', sessionRevoked
+                ? { sessionRevoked, error: 'Telegram session expired — reconnect required' }
+                : { sessionRevoked });
         } else if (!clientDisconnected && !res.destroyed) {
             res.destroy(err);
         }
@@ -748,7 +722,7 @@ router.get('/search', authenticateUser, rateLimit(30, 60 * 1000), async (req, re
         );
         res.json({ success: true, query: q, count: files.length, files });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
@@ -769,13 +743,13 @@ router.get('/stats', authenticateUser, async (req, res) => {
             }
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
 // ─── DELETE ──────────────────────────────────────────────────────────────────
 
-router.delete('/files/:id', authenticateUser, async (req, res) => {
+router.delete('/files/:id', authenticateTelegram, async (req, res) => {
     try {
         const [files] = await pool.execute('SELECT * FROM uploaded_files WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
         if (files.length === 0) return res.status(404).json({ error: 'File not found' });
@@ -818,7 +792,7 @@ router.delete('/files/:id', authenticateUser, async (req, res) => {
         if (result.affectedRows === 0) return res.status(404).json({ error: 'File not found' });
         res.json({ success: true, message: 'File deleted from Telegram and database' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
@@ -838,7 +812,7 @@ router.put('/files/:id/move', authenticateUser, async (req, res) => {
         if (result.affectedRows === 0) return res.status(404).json({ error: 'File not found' });
         res.json({ success: true });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
@@ -871,12 +845,12 @@ router.post('/files/:id/copy', authenticateUser, async (req, res) => {
             file: { id: newId, original_name: src.original_name, file_size: src.file_size, mime_type: src.mime_type, telegram_message_id: src.telegram_message_id, channel_id: src.channel_id, folder_id: folderId },
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
 // ─── SYNC CHANNELS FROM TELEGRAM ─────────────────────────────────────────
-router.post('/sync-channels', authenticateUser, async (req, res) => {
+router.post('/sync-channels', authenticateTelegram, async (req, res) => {
     // A dialog sync can iterate hundreds of dialogs and take a while — sharing the
     // per-user Telegram connection with an in-progress download/view without going
     // through the same queue lets their requests interleave and stall each other.
@@ -931,13 +905,10 @@ router.post('/sync-channels', authenticateUser, async (req, res) => {
         // marked dead so a channel sync retry doesn't keep reconnecting with the same
         // dead auth key — repeated failed auth attempts are what gets Telegram to
         // terminate every session on the account, phone included.
-        const sessionRevoked = err.sessionRevoked || DEAD_SESSION_PATTERN.test(err.message);
-        if (sessionRevoked) {
-            tgManager.markSessionDead(req.user.id, req.user.telegram_session);
-        } else if (tgOperationStarted) {
-            tgManager.forceReconnect(req.user.id);
-        }
-        res.status(500).json({ error: err.message, sessionRevoked });
+        const sessionRevoked = handleTelegramFailure(req.user, err, { operationStarted: tgOperationStarted });
+        sendError(res, err, 'Sync-channels error', sessionRevoked
+            ? { sessionRevoked, error: 'Telegram session expired — reconnect required' }
+            : { sessionRevoked });
     } finally {
         tgManager.resumeTimer(req.user.id);
         releaseDownloadSlot?.();
@@ -953,44 +924,61 @@ router.get('/channels', authenticateUser, async (req, res) => {
         );
         res.json({ success: true, channels });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
 // ─── FOLDERS ─────────────────────────────────────────────────────────────────
 
-router.get('/folders', authenticateUser, async (req, res) => {
+// Express 4 doesn't catch rejected promises from async handlers, so every handler below is
+// wrapped in asyncHandler (→ app-level error handler → generic 500) instead of crashing.
+
+const MAX_FOLDER_NAME = 255;
+const MAX_FOLDER_DEPTH = 50;
+const cleanName = (v) => (typeof v === 'string' ? v.trim() : '');
+
+router.get('/folders', authenticateUser, asyncHandler(async (req, res) => {
     const parentId = req.query.parent_id === 'null' ? null : req.query.parent_id || null;
     const [folders] = await pool.execute(
         'SELECT * FROM folders WHERE user_id = ? AND parent_id ' + (parentId ? '= ?' : 'IS NULL') + ' ORDER BY name',
         parentId ? [req.user.id, parentId] : [req.user.id]
     );
     res.json({ success: true, folders });
-});
+}));
 
-router.post('/folders', authenticateUser, async (req, res) => {
-    const { name, parent_id } = req.body;
+router.post('/folders', authenticateUser, asyncHandler(async (req, res) => {
+    const name = cleanName(req.body.name);
+    const parentId = req.body.parent_id || null;
+    if (!name || name.length > MAX_FOLDER_NAME) {
+        return res.status(400).json({ error: `Folder name must be 1-${MAX_FOLDER_NAME} characters` });
+    }
+    if (parentId) {
+        const [parents] = await pool.execute('SELECT id FROM folders WHERE id = ? AND user_id = ?', [parentId, req.user.id]);
+        if (parents.length === 0) return res.status(404).json({ error: 'Parent folder not found' });
+    }
     const id = uuidv4();
-    await pool.execute('INSERT INTO folders (id, user_id, name, parent_id) VALUES (?, ?, ?, ?)', [id, req.user.id, name, parent_id || null]);
-    res.json({ success: true, folder: { id, name, parent_id } });
-});
+    await pool.execute('INSERT INTO folders (id, user_id, name, parent_id) VALUES (?, ?, ?, ?)', [id, req.user.id, name, parentId]);
+    res.json({ success: true, folder: { id, name, parent_id: parentId } });
+}));
 
-router.delete('/folders/:id', authenticateUser, async (req, res) => {
+router.delete('/folders/:id', authenticateUser, asyncHandler(async (req, res) => {
     await pool.execute('DELETE FROM folders WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
     res.json({ success: true });
-});
+}));
 
-router.get('/folders/path/:id', authenticateUser, async (req, res) => {
+router.get('/folders/path/:id', authenticateUser, asyncHandler(async (req, res) => {
     const path = [];
     let currentId = req.params.id;
-    while (currentId) {
-        const [rows] = await pool.execute('SELECT * FROM folders WHERE id = ?', [currentId]);
+    // user_id in the lookup: without it any user could read any other user's folder
+    // names by id. The depth cap stops a corrupted parent cycle from looping forever.
+    while (currentId && path.length < MAX_FOLDER_DEPTH) {
+        const [rows] = await pool.execute('SELECT * FROM folders WHERE id = ? AND user_id = ?', [currentId, req.user.id]);
         if (rows.length === 0) break;
         path.unshift(rows[0]);
         currentId = rows[0].parent_id;
     }
     res.json({ success: true, path });
-});
+}));
 
 // ─── RENAME FILE ─────────────────────────────────────────────────────────────
 
@@ -1005,7 +993,7 @@ router.put('/files/:id/rename', authenticateUser, async (req, res) => {
         if (result.affectedRows === 0) return res.status(404).json({ error: 'File not found' });
         res.json({ success: true, message: 'File renamed' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 
@@ -1022,7 +1010,7 @@ router.put('/folders/:id/rename', authenticateUser, async (req, res) => {
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Folder not found' });
         res.json({ success: true, message: 'Folder renamed' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, `${req.method} ${req.path} error`);
     }
 });
 

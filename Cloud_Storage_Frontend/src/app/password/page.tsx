@@ -48,7 +48,7 @@ function PasswordContent() {
 
     const handleResetPassword = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (newPassword.length < 6) { setError('Password must be at least 6 characters'); return; }
+        if (newPassword.length < 8) { setError('Password must be at least 8 characters'); return; }
         if (newPassword !== confirmPassword) { setError('Passwords do not match'); return; }
         setLoading(true);
         setError('');
@@ -160,7 +160,7 @@ function PasswordContent() {
                                     value={newPassword}
                                     onChange={(e) => setNewPassword(e.target.value)}
                                     className="w-full pl-10 pr-4 py-3 bg-white dark:bg-black border border-gray-300 dark:border-gray-700 rounded-xl text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white text-sm"
-                                    placeholder="Min 6 characters"
+                                    placeholder="Min 8 characters"
                                     required
                                 />
                             </div>

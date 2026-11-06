@@ -294,6 +294,52 @@ class ApiService {
         return this.request<{ status: string; timestamp: string; maxFileSize: string; database: string }>('/api/health');
     }
 
+    // Streams upload progress (server-sent events) using fetch() so the JWT travels in the
+    // Authorization header. EventSource can't set headers, which used to force the token
+    // into the URL query string — where it ends up in server logs and browser history.
+    // Returns an object with close(), mirroring EventSource's shape.
+    subscribeUploadProgress(uploadId: string, onProgress: (progress: number) => void): { close: () => void } {
+        const controller = new AbortController();
+        const token = this.getToken();
+
+        (async () => {
+            try {
+                const response = await fetch(`${this.baseUrl}/api/upload-progress/${encodeURIComponent(uploadId)}`, {
+                    headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+                    signal: controller.signal,
+                });
+                if (!response.ok || !response.body) return;
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    // SSE events are separated by a blank line.
+                    let boundary: number;
+                    while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+                        const event = buffer.slice(0, boundary);
+                        buffer = buffer.slice(boundary + 2);
+                        const data = event.split('\n').find((line) => line.startsWith('data:'));
+                        if (!data) continue;
+                        try {
+                            const parsed = JSON.parse(data.slice(5).trim());
+                            if (typeof parsed.progress === 'number') onProgress(parsed.progress);
+                        } catch {
+                            /* ignore a malformed event */
+                        }
+                    }
+                }
+            } catch {
+                /* aborted or connection dropped — progress is cosmetic, the upload itself is unaffected */
+            }
+        })();
+
+        return { close: () => controller.abort() };
+    }
+
     // Initialize token from sessionStorage
     initToken() {
         if (typeof window !== 'undefined') {

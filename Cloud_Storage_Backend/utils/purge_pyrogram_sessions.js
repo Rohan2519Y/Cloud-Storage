@@ -4,6 +4,7 @@ const { TelegramClient } = require('@mtcute/node');
 const { MemoryStorage } = require('@mtcute/core');
 const pool = require('./database');
 const { withTimeout } = require('./withTimeout');
+const { decryptSession } = require('./crypto');
 
 const TERMINATE = process.argv.includes('--terminate');
 const CONNECT_TIMEOUT = 20 * 1000;
@@ -133,7 +134,15 @@ async function listAndPurge(user) {
 
     console.log(`Found ${users.length} user(s) with a stored Telegram session.`);
 
-    for (const user of users) {
+    for (const row of users) {
+        // Sessions are stored encrypted; legacy plaintext rows pass through unchanged.
+        let user;
+        try {
+            user = { ...row, telegram_session: decryptSession(row.telegram_session) };
+        } catch (err) {
+            console.error(`   ⚠️ Skipping user ${row.id}: cannot decrypt stored session (${err.message})`);
+            continue;
+        }
         await listAndPurge(user);
         await new Promise((r) => setTimeout(r, DELAY_BETWEEN_USERS));
     }

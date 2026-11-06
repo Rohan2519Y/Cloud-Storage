@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "start": "node ./bin/www",
-    "dev": "nodemon ./bin/www"
+    "dev": "nodemon ./bin/www",
+    "test": "node test/crypto.test.js && node test/api.test.js",
+    "db:encrypt-secrets": "node scripts/encrypt-existing-secrets.js"
   },
   "dependencies": {
     "@mtcute/core": "^0.29.7",

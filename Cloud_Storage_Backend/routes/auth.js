@@ -3,24 +3,51 @@ const express = require('express');
 const router = express.Router();
 const { TelegramClient } = require('@mtcute/node');
 const { MemoryStorage } = require('@mtcute/core');
-const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
 const pool = require('../utils/database');
 const { sendMail, generateResetToken, verifyResetToken } = require('../utils/mailer');
-const { encrypt, decrypt } = require('../utils/crypto');
+const { encrypt, decrypt, encryptSession } = require('../utils/crypto');
 const tgManager = require('../utils/telegramClientManager');
 const { rateLimit } = require('../utils/rateLimit');
+const { authenticate, signSessionToken } = require('../utils/authMiddleware');
+const { sendError } = require('../utils/httpErrors');
 
-// ─── JWT helpers ────────────────────────────────────────────────────────────
+const signToken = signSessionToken;
 
-function getJwtSecret() {
-    const secret = process.env.JWT_SECRET;
-    if (!secret) throw new Error('JWT_SECRET environment variable is not set');
-    return secret;
+// ─── Input validation ───────────────────────────────────────────────────────
+
+const BCRYPT_COST = 12;
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MAX_BYTES = 72; // bcrypt silently ignores everything past 72 bytes
+const COMMON_PASSWORDS = new Set([
+    'password', 'password1', 'password123', '12345678', '123456789', '1234567890',
+    'qwertyui', 'qwerty123', 'iloveyou', 'admin123', 'welcome1', 'letmein123',
+]);
+
+// Returns an error message, or null when the password is acceptable.
+function validatePassword(password) {
+    if (typeof password !== 'string') return 'Password required';
+    if (password.length < PASSWORD_MIN_LENGTH) return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
+    if (Buffer.byteLength(password, 'utf8') > PASSWORD_MAX_BYTES) return `Password must be at most ${PASSWORD_MAX_BYTES} bytes`;
+    if (COMMON_PASSWORDS.has(password.toLowerCase()) || /^(.)\1+$/.test(password)) return 'That password is too easy to guess';
+    return null;
 }
-function signToken(payload) { return jwt.sign(payload, getJwtSecret(), { expiresIn: '7d' }); }
-function verifyToken(token) { return jwt.verify(token, getJwtSecret()); }
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+// Returns the normalized (trimmed, lower-cased) email, or null when it isn't valid.
+function normalizeEmail(email) {
+    if (typeof email !== 'string') return null;
+    const e = email.trim().toLowerCase();
+    return e.length <= 254 && EMAIL_PATTERN.test(e) ? e : null;
+}
+
+// Reset links go to the first configured frontend origin (ALLOWED_ORIGINS is a list).
+function frontendOrigin() {
+    const first = (process.env.ALLOWED_ORIGINS || '').split(',')[0].trim().replace(/\/+$/, '');
+    return first || 'http://localhost:4000';
+}
 
 // ─── Temp OTP store with auto cleanup ───────────────────────────────────────
 // Same structure as before — stores mtcute client instead of gramjs client
@@ -50,36 +77,20 @@ setInterval(async () => {
     }
 }, 60 * 1000);
 
-// ─── Auth middleware ─────────────────────────────────────────────────────────
-
-async function authenticate(req, res, next) {
-    try {
-        const token = req.headers.authorization?.replace('Bearer ', '');
-        if (!token) return res.status(401).json({ error: 'No token provided' });
-        const decoded = verifyToken(token);
-        const [users] = await pool.execute('SELECT * FROM users WHERE id = ?', [decoded.userId]);
-        if (users.length === 0) return res.status(401).json({ error: 'User not found' });
-        // Reject tokens issued before the password was last reset, so a password
-        // change actually forces a fresh login instead of leaving old sessions valid.
-        const passwordChangedAt = users[0].password_changed_at;
-        if (passwordChangedAt && decoded.iat * 1000 < new Date(passwordChangedAt).getTime()) {
-            return res.status(401).json({ error: 'Password was changed. Please log in again.' });
-        }
-        req.user = users[0];
-        req.decoded = decoded;
-        next();
-    } catch {
-        res.status(401).json({ error: 'Invalid or expired token' });
-    }
-}
-
 // ─── STEP 1: Send OTP ────────────────────────────────────────────────────────
 
+const isValidPhone = (p) => typeof p === 'string' && /^\+?[0-9 ()-]{6,25}$/.test(p);
+
 router.post('/send-code', rateLimit(5, 60 * 1000), async (req, res) => {
+    let pendingClient = null;
     try {
         const { phoneNumber, apiId, apiHash } = req.body;
         if (!phoneNumber) return res.status(400).json({ error: 'Phone number required' });
+        if (!isValidPhone(phoneNumber)) return res.status(400).json({ error: 'Invalid phone number' });
         if (!apiId || !apiHash) return res.status(400).json({ error: 'API ID and API Hash required' });
+        if (!/^\d{1,12}$/.test(String(apiId)) || typeof apiHash !== 'string' || !/^[0-9a-zA-Z]{8,64}$/.test(apiHash)) {
+            return res.status(400).json({ error: 'Invalid API ID or API Hash' });
+        }
 
         // Tear down any existing session for this phone (keepalive included)
         await destroyTempLogin(phoneNumber);
@@ -93,6 +104,7 @@ router.post('/send-code', rateLimit(5, 60 * 1000), async (req, res) => {
             storage: new MemoryStorage(),
         });
 
+        pendingClient = client;
         await client.connect();
         const sentCode = await client.sendCode({ phone: phoneNumber });
 
@@ -110,19 +122,11 @@ router.post('/send-code', rateLimit(5, 60 * 1000), async (req, res) => {
         res.json({ success: true, message: 'Code sent to Telegram', phoneNumber });
 
     } catch (err) {
-        console.error('Send code error:', err.message);
-
-        // Handle FLOOD_WAIT errors
-        if (err.message.includes('FLOOD_WAIT')) {
-            const waitSeconds = err.message.match(/FLOOD_WAIT_(\d+)/)?.[1];
-            const waitMinutes = Math.ceil(waitSeconds / 60);
-            return res.status(429).json({
-                error: `Too many attempts. Please wait ${waitMinutes} minutes before requesting a new code.`,
-                retryAfter: parseInt(waitSeconds)
-            });
+        // A client that connected but never made it into tempLogins would otherwise leak.
+        if (pendingClient && !tempLogins.get(req.body?.phoneNumber)?.client) {
+            try { await pendingClient.disconnect(); } catch (_) { }
         }
-
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Send code error');
     }
 });
 
@@ -219,8 +223,9 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
                 // The Telegram authorization itself succeeded — only the channel the
                 // user picked is unusable. Report that, but note the session created
                 // here is deliberately abandoned; see the persistence note below.
+                console.error('Channel verification error:', err.message);
                 await destroyTempLogin(phoneNumber);
-                return res.status(400).json({ error: `Cannot access channel: ${err.message}` });
+                return res.status(400).json({ error: 'Cannot access that channel. Check the username/ID and that your account is a member.' });
             }
         }
 
@@ -236,8 +241,12 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
         // if the user has since disabled 2FA on Telegram's side.
         const encrypted2FAPassword = tempData.verified2FAPassword ? encrypt(tempData.verified2FAPassword) : null;
 
+        // The session string is full access to the user's Telegram account — it is only
+        // ever stored encrypted (see utils/crypto.js).
+        const storedSession = encryptSession(sessionString);
+
         const [existingUsers] = await pool.execute(
-            'SELECT * FROM users WHERE phone_number = ?', [phoneNumber]
+            'SELECT id FROM users WHERE phone_number = ?', [phoneNumber]
         );
 
         let userId;
@@ -247,7 +256,7 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
                 `UPDATE users SET telegram_session=?, telegram_id=?, username=?, first_name=?,
                  last_name=?, telegram_api_id=?, telegram_api_hash=?, default_group_id=?,
                  default_channel_username=?, telegram_2fa_password_enc=?, last_login=NOW() WHERE phone_number=?`,
-                [sessionString, telegramId, me.username, me.firstName, me.lastName,
+                [storedSession, telegramId, me.username, me.firstName, me.lastName,
                     tempData.apiId, tempData.apiHash, resolvedGroupId, resolvedChannelUsername, encrypted2FAPassword, phoneNumber]
             );
         } else {
@@ -257,7 +266,7 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
                  first_name, last_name, telegram_api_id, telegram_api_hash,
                  default_group_id, default_channel_username, telegram_2fa_password_enc)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [userId, phoneNumber, sessionString, telegramId, me.username,
+                [userId, phoneNumber, storedSession, telegramId, me.username,
                     me.firstName, me.lastName, tempData.apiId, tempData.apiHash,
                     resolvedGroupId, resolvedChannelUsername, encrypted2FAPassword]
             );
@@ -294,13 +303,6 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
 
         await userClient.disconnect();
 
-        // Clean up session file after successful auth
-        try {
-            const fs = require('fs');
-            const sessionFile = `./sessions/auth_${phoneNumber.replace(/[^0-9]/g, '')}.json`;
-            if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
-        } catch (_) { }
-
         const token = signToken({ userId, phoneNumber, defaultGroupId: resolvedGroupId });
 
         res.json({
@@ -319,21 +321,14 @@ router.post('/verify', rateLimit(10, 60 * 1000), async (req, res) => {
         });
 
     } catch (err) {
-        console.error('Verify error:', err.message);
-        await destroyTempLogin(req.body.phoneNumber);
-        // Clean up session file on error too
-        try {
-            const fs = require('fs');
-            const sessionFile = `./sessions/auth_${(req.body.phoneNumber || '').replace(/[^0-9]/g, '')}.json`;
-            if (fs.existsSync(sessionFile)) fs.unlinkSync(sessionFile);
-        } catch (_) { }
-        res.status(500).json({ error: err.message });
+        await destroyTempLogin(req.body?.phoneNumber);
+        sendError(res, err, 'Verify error');
     }
 });
 
 // ─── Get current user ────────────────────────────────────────────────────────
 
-router.get('/me', authenticate, async (req, res) => {
+router.get('/me', authenticate(), async (req, res) => {
     try {
         const [channels] = await pool.execute(
             'SELECT channel_id, channel_title, channel_username FROM user_channels WHERE user_id = ?',
@@ -342,19 +337,23 @@ router.get('/me', authenticate, async (req, res) => {
         const { id, phone_number, username, first_name, last_name, default_group_id, default_channel_username } = req.user;
         res.json({ user: { id, phone_number, username, first_name, last_name, default_group_id, default_channel_username }, channels });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Get current user error');
     }
 });
 
 // ─── Complete profile ────────────────────────────────────────────────────────
 
-router.post('/complete-profile', authenticate, async (req, res) => {
+router.post('/complete-profile', authenticate(), async (req, res) => {
     try {
-        const { email, password } = req.body;
-        if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-        if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        const { password } = req.body;
+        if (!req.body.email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-        const password_hash = await bcrypt.hash(password, 10);
+        const email = normalizeEmail(req.body.email);
+        if (!email) return res.status(400).json({ error: 'Please enter a valid email address' });
+        const passwordError = validatePassword(password);
+        if (passwordError) return res.status(400).json({ error: passwordError });
+
+        const password_hash = await bcrypt.hash(password, BCRYPT_COST);
         const [result] = await pool.execute(
             'UPDATE users SET email=?, password_hash=?, is_profile_complete=TRUE, updated_at=NOW() WHERE id=?',
             [email, password_hash, req.user.id]
@@ -364,7 +363,7 @@ router.post('/complete-profile', authenticate, async (req, res) => {
 
     } catch (err) {
         if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already in use' });
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Complete profile error');
     }
 });
 
@@ -374,10 +373,16 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
     try {
         const { identifier, password } = req.body;
         if (!identifier || !password) return res.status(400).json({ error: 'Email/phone and password required' });
+        if (typeof identifier !== 'string' || typeof password !== 'string' || identifier.length > 254 || password.length > 1024) {
+            return res.status(400).json({ error: 'Invalid credentials' });
+        }
+        const loginId = identifier.trim();
 
         const [users] = await pool.execute(
-            'SELECT * FROM users WHERE (email=? OR phone_number=?) AND is_profile_complete=TRUE',
-            [identifier, identifier]
+            `SELECT id, email, phone_number, username, first_name, last_name, default_group_id,
+                    default_channel_username, password_hash
+             FROM users WHERE (email=? OR phone_number=?) AND is_profile_complete=TRUE`,
+            [loginId, loginId]
         );
         if (users.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
@@ -386,6 +391,15 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
 
         const isValid = await bcrypt.compare(password, user.password_hash);
         if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+
+        // Hashes created before the cost bump are upgraded transparently on login.
+        if (bcrypt.getRounds(user.password_hash) < BCRYPT_COST) {
+            try {
+                await pool.execute('UPDATE users SET password_hash=? WHERE id=?', [await bcrypt.hash(password, BCRYPT_COST), user.id]);
+            } catch (err) {
+                console.warn('Password rehash failed (login continues):', err.message);
+            }
+        }
 
         await pool.execute('UPDATE users SET last_login=NOW() WHERE id=?', [user.id]);
 
@@ -401,7 +415,7 @@ router.post('/login', rateLimit(10, 60 * 1000), async (req, res) => {
             },
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Login error');
     }
 });
 
@@ -422,7 +436,7 @@ setInterval(async () => {
     }
 }, 60 * 1000);
 
-router.post('/reconnect-send-code', authenticate, rateLimit(5, 60 * 1000), async (req, res) => {
+router.post('/reconnect-send-code', authenticate({ telegram: true }), rateLimit(5, 60 * 1000), async (req, res) => {
     try {
         const user = req.user;
         if (!user.telegram_api_id || !user.telegram_api_hash) {
@@ -453,19 +467,11 @@ router.post('/reconnect-send-code', authenticate, rateLimit(5, 60 * 1000), async
 
         res.json({ success: true, message: 'Code sent to Telegram' });
     } catch (err) {
-        console.error('Reconnect send-code error:', err.message);
-        if (err.message.includes('FLOOD_WAIT')) {
-            const waitSeconds = err.message.match(/FLOOD_WAIT_(\d+)/)?.[1];
-            return res.status(429).json({
-                error: `Too many attempts. Please wait ${Math.ceil(waitSeconds / 60)} minutes and try again.`,
-                retryAfter: parseInt(waitSeconds),
-            });
-        }
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Reconnect send-code error');
     }
 });
 
-router.post('/reconnect-verify', authenticate, rateLimit(10, 60 * 1000), async (req, res) => {
+router.post('/reconnect-verify', authenticate({ telegram: true }), rateLimit(10, 60 * 1000), async (req, res) => {
     const user = req.user;
     const session = reconnectSessions.get(user.id);
     try {
@@ -503,8 +509,14 @@ router.post('/reconnect-verify', authenticate, rateLimit(10, 60 * 1000), async (
             // before ever bothering the user — this is the "check the saved 2FA
             // password" step.
             if (!passwordToTry && !session.triedStoredPassword && user.telegram_2fa_password_enc) {
-                passwordToTry = decrypt(user.telegram_2fa_password_enc);
-                isStoredAttempt = true;
+                try {
+                    passwordToTry = decrypt(user.telegram_2fa_password_enc);
+                    isStoredAttempt = true;
+                } catch (decryptErr) {
+                    // Unreadable (key changed) — fall through and ask the user instead.
+                    console.error(`Could not decrypt stored 2FA password for user ${user.id}: ${decryptErr.message}`);
+                    session.triedStoredPassword = true;
+                }
             }
 
             // 400, not 401: the user's JWT is perfectly valid here, this just means
@@ -542,7 +554,7 @@ router.post('/reconnect-verify', authenticate, rateLimit(10, 60 * 1000), async (
         // Settings > Devices, consuming a session slot) while the DB keeps serving the
         // old dead one — which looks exactly like "Telegram says active, app says
         // revoked". Disconnecting is cleanup and must never cost us the new session.
-        await pool.execute('UPDATE users SET telegram_session = ?, last_login = NOW() WHERE id = ?', [sessionString, user.id]);
+        await pool.execute('UPDATE users SET telegram_session = ?, last_login = NOW() WHERE id = ?', [encryptSession(sessionString), user.id]);
 
         try { await session.client.disconnect(); } catch (_) { }
         reconnectSessions.delete(user.id);
@@ -552,36 +564,37 @@ router.post('/reconnect-verify', authenticate, rateLimit(10, 60 * 1000), async (
 
         res.json({ success: true, message: 'Telegram reconnected' });
     } catch (err) {
-        console.error('Reconnect verify error:', err.message);
         if (session?.client) {
             try { await session.client.disconnect(); } catch (_) { }
             reconnectSessions.delete(user.id);
         }
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Reconnect verify error');
     }
 });
 
 // ─── FORGOT PASSWORD — send reset email ─────────────────────────────────
 router.post('/forgot-password', rateLimit(10, 60 * 1000), async (req, res) => {
     try {
-        const { email } = req.body;
-        if (!email) return res.status(400).json({ error: 'Email required' });
+        if (!req.body.email) return res.status(400).json({ error: 'Email required' });
+        const GENERIC = { success: true, message: 'If the email exists, a reset link has been sent.' };
+        const email = normalizeEmail(req.body.email);
+        if (!email) return res.json(GENERIC); // same answer as "unknown email"
 
         const [users] = await pool.execute(
             'SELECT id, email FROM users WHERE email = ? AND is_profile_complete = TRUE',
             [email]
         );
 
-        // Always return success to prevent email enumeration
-        if (users.length === 0) {
-            return res.json({ success: true, message: 'If the email exists, a reset link has been sent.' });
-        }
+        // Always return the same response to prevent email enumeration.
+        if (users.length === 0) return res.json(GENERIC);
 
         const user = users[0];
         const token = generateResetToken(user.id, user.email);
-        const resetUrl = `${process.env.ALLOWED_ORIGINS || 'http://localhost:4000'}/password?token=${token}`;
+        const resetUrl = `${frontendOrigin()}/password?token=${encodeURIComponent(token)}`;
 
-        await sendMail({
+        // Not awaited: waiting on the mail provider would make "account exists"
+        // measurably slower than "no such account", re-opening the enumeration hole.
+        sendMail({
             to: user.email,
             subject: 'Reset Your Password - CloudStorage',
             html: `
@@ -590,11 +603,11 @@ router.post('/forgot-password', rateLimit(10, 60 * 1000), async (req, res) => {
                 <a href="${resetUrl}" style="display:inline-block;padding:12px 24px;background:#000;color:#fff;border-radius:8px;text-decoration:none;font-weight:bold;">Reset Password</a>
                 <p style="margin-top:16px;color:#666;">If you didn't request this, you can safely ignore this email.</p>
             `
-        });
+        }).catch((err) => console.error('Reset email failed:', err.message));
 
-        res.json({ success: true, message: 'If the email exists, a reset link has been sent.' });
+        res.json(GENERIC);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Forgot password error');
     }
 });
 
@@ -603,12 +616,21 @@ router.post('/reset-password', rateLimit(10, 60 * 1000), async (req, res) => {
     try {
         const { token, newPassword } = req.body;
         if (!token || !newPassword) return res.status(400).json({ error: 'Token and new password required' });
-        if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        const passwordError = validatePassword(newPassword);
+        if (passwordError) return res.status(400).json({ error: passwordError });
 
-        const decoded = verifyResetToken(token);
+        const decoded = typeof token === 'string' ? verifyResetToken(token) : null;
         if (!decoded) return res.status(400).json({ error: 'Invalid or expired token' });
 
-        const password_hash = await bcrypt.hash(newPassword, 10);
+        // A reset link is single-use: once the password has changed since the link was
+        // issued, the link is dead (otherwise it stays replayable for its full 30 minutes).
+        const [rows] = await pool.execute('SELECT password_changed_at FROM users WHERE id = ?', [decoded.userId]);
+        if (rows.length === 0) return res.status(400).json({ error: 'Invalid or expired token' });
+        if (rows[0].password_changed_at && decoded.iat * 1000 < new Date(rows[0].password_changed_at).getTime()) {
+            return res.status(400).json({ error: 'Invalid or expired token' });
+        }
+
+        const password_hash = await bcrypt.hash(newPassword, BCRYPT_COST);
         // password_changed_at invalidates any JWT issued before this moment (see
         // `authenticate`) — otherwise sessions started under the old password would
         // stay valid for up to 7 more days after a reset.
@@ -619,13 +641,13 @@ router.post('/reset-password', rateLimit(10, 60 * 1000), async (req, res) => {
 
         res.json({ success: true, message: 'Password reset successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        sendError(res, err, 'Reset password error');
     }
 });
 
 // ─── Profile status ──────────────────────────────────────────────────────────
 
-router.get('/profile-status', authenticate, (req, res) => {
+router.get('/profile-status', authenticate(), (req, res) => {
     const { is_profile_complete, email, first_name } = req.user;
     res.json({ isProfileComplete: is_profile_complete, email, firstName: first_name });
 });

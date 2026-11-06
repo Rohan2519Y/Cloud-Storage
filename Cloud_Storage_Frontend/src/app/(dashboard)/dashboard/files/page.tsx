@@ -120,7 +120,7 @@ export default function FilesPage() {
     const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set())
 
     const fileInputRef = useRef<HTMLInputElement>(null)
-    const uploadConnectionsRef = useRef<Map<string, { xhr: XMLHttpRequest; evt: EventSource }>>(new Map())
+    const uploadConnectionsRef = useRef<Map<string, { xhr: XMLHttpRequest; evt: { close: () => void } }>>(new Map())
     const activeUploadCountRef = useRef(0)
     const sortDropdownRef = useRef<HTMLDivElement>(null)
     const channelDropdownRef = useRef<HTMLDivElement>(null)
@@ -329,12 +329,10 @@ export default function FilesPage() {
         const token = apiService.getToken()!
         updateQueueItem(uploadId, { status: 'uploading', progress: 0 })
 
-        const evt = new EventSource(`${BASE}/api/upload-progress/${uploadId}?token=${token}`)
-        evt.onmessage = (e) => {
-            const d = JSON.parse(e.data)
-            updateQueueItem(uploadId, { progress: d.progress })
-        }
-        evt.onerror = () => evt.close()
+        // Progress stream authenticates via the Authorization header (no token in the URL).
+        const evt = apiService.subscribeUploadProgress(uploadId, (progress) => {
+            updateQueueItem(uploadId, { progress })
+        })
 
         const xhr = new XMLHttpRequest()
         uploadConnectionsRef.current.set(uploadId, { xhr, evt })
