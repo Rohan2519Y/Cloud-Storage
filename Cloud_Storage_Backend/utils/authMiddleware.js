@@ -133,4 +133,16 @@ function signDownloadTicket(userId, messageId) {
     );
 }
 
-module.exports = { authenticate, authenticateDownload, signSessionToken, signDownloadTicket };
+module.exports = {
+    authenticate,
+    authenticateDownload,
+    signSessionToken,
+    signDownloadTicket,
+    // Ready-made instances, so route files don't each rebuild them:
+    //   requireUser           → basic user columns (no Telegram secrets loaded)
+    //   requireTelegram       → plus the decrypted Telegram session + API credentials
+    //   requireDownloadTicket → Authorization header OR a short-lived ?dt= download ticket
+    requireUser: authenticate(),
+    requireTelegram: authenticate({ telegram: true }),
+    requireDownloadTicket: authenticateDownload(),
+};

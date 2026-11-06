@@ -22,7 +22,7 @@ if (process.env.JWT_SECRET === process.env.TELEGRAM_2FA_ENC_KEY) {
 }
 
 const authRoutes = require('./routes/auth');
-const uploadRouter = require('./routes/upload');
+const apiRouter = require('./routes');
 const tgManager = require('./utils/telegramClientManager');
 
 const app = express();
@@ -86,7 +86,7 @@ if (process.env.NODE_ENV !== 'production') {
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Routes ────────────────────────────────────────────────────────────────
-app.use('/api', uploadRouter);
+app.use('/api', apiRouter);
 app.use('/api/auth', authRoutes);
 
 app.get('/', (req, res) => {

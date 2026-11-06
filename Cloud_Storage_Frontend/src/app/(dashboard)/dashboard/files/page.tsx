@@ -125,6 +125,11 @@ export default function FilesPage() {
     const sortDropdownRef = useRef<HTMLDivElement>(null)
     const channelDropdownRef = useRef<HTMLDivElement>(null)
     const thumbnailUrlMapRef = useRef<Record<string, string>>({})
+    // Message ids whose thumbnail is loaded OR currently being fetched. Checking only the
+    // finished map let a second fetchFiles() (StrictMode's double mount in dev, a folder
+    // change, an upload finishing) start duplicate requests for thumbnails still in flight —
+    // and every thumbnail request holds the user's single Telegram queue slot.
+    const thumbnailRequestedRef = useRef<Set<string>>(new Set())
 
     const BASE = apiService['baseUrl'] || process.env.NEXT_PUBLIC_API_URL || ''
 
@@ -204,13 +209,16 @@ export default function FilesPage() {
     )
 
     const loadThumbnail = useCallback(async (messageId: string) => {
+        if (thumbnailRequestedRef.current.has(messageId)) return
+        thumbnailRequestedRef.current.add(messageId)
         try {
             const blob = await apiService.viewFileAsBlob(messageId, true)
             const url = URL.createObjectURL(blob)
             thumbnailUrlMapRef.current[messageId] = url
             setThumbnailUrls((prev) => ({ ...prev, [messageId]: url }))
         } catch {
-            // ignore
+            // Allow a later fetchFiles() to retry a thumbnail that failed.
+            thumbnailRequestedRef.current.delete(messageId)
         }
     }, [])
 
